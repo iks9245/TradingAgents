@@ -1,0 +1,442 @@
+"""Deterministic verification snapshot for company fundamentals.
+
+Statement dumps leave an LLM to divide, select a period, and infer a unit at
+once. That is how a TTM margin is pasted into a fiscal-year row and a 6.01%
+debt/equity figure becomes "6.01x". This module keeps the statement line items
+visible, computes the ratios in Python, and gives the analyst one source of
+truth for every derived fundamental claim.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Iterable
+
+import pandas as pd
+import yfinance as yf
+
+from tradingagents.dataflows.fundamental_units import (
+    fmt_money,
+    fmt_multiple,
+    fmt_price,
+    pct_change,
+    safe_ratio,
+)
+from tradingagents.dataflows.stockstats_utils import (
+    filter_financials_by_date,
+    load_ohlcv,
+    yf_retry,
+)
+from tradingagents.dataflows.symbol_utils import normalize_symbol
+
+
+def _row(df: pd.DataFrame, *candidates: str) -> pd.Series | None:
+    """Find a statement row despite yfinance label drift, without guessing.
+
+    Exact labels take precedence. If Yahoo changes capitalization or adds a
+    qualifier, try a case-insensitive exact match and then a substring match
+    for each requested label in order. A missing row stays missing: borrowing a
+    nearby line item would recreate the statement-mapping errors this snapshot
+    is intended to prevent.
+    """
+    if df is None or df.empty:
+        return None
+    labels = [str(label) for label in df.index]
+    for candidate in candidates:
+        if candidate in df.index:
+            return df.loc[candidate]
+    lowered = [(label, label.casefold()) for label in labels]
+    for candidate in candidates:
+        wanted = candidate.casefold()
+        for label, comparable in lowered:
+            if comparable == wanted:
+                return df.loc[label]
+    for candidate in candidates:
+        wanted = candidate.casefold()
+        for label, comparable in lowered:
+            if wanted in comparable:
+                return df.loc[label]
+    return None
+
+
+def _statement(ticker: yf.Ticker, name: str, curr_date: str) -> pd.DataFrame:
+    """Read one statement safely and always remove future filing columns."""
+    try:
+        # Property access is rate-limited too; a retry here avoids a partial
+        # snapshot when Yahoo returns HTTP 429 while loading one statement.
+        data = yf_retry(lambda: getattr(ticker, name))
+    except Exception:  # noqa: BLE001 -- one unavailable statement must not hide the others
+        data = pd.DataFrame()
+    if not isinstance(data, pd.DataFrame):
+        data = pd.DataFrame()
+    return filter_financials_by_date(data, curr_date)
+
+
+def _periods(*series: pd.Series | None, limit: int = 4) -> list[pd.Timestamp]:
+    """Return dated statement columns newest first, limited for readable tables."""
+    dates: set[pd.Timestamp] = set()
+    for values in series:
+        if values is None:
+            continue
+        for column in values.index:
+            date = pd.to_datetime(column, errors="coerce")
+            if not pd.isna(date):
+                dates.add(pd.Timestamp(date))
+    return sorted(dates, reverse=True)[:limit]
+
+
+def _value(values: pd.Series | None, period: pd.Timestamp) -> float | None:
+    """Return a numeric value for one fiscal column, treating NaN as missing."""
+    if values is None:
+        return None
+    for column, raw in values.items():
+        if pd.to_datetime(column, errors="coerce") == period:
+            try:
+                number = float(raw)
+            except (TypeError, ValueError):
+                return None
+            return None if pd.isna(number) else number
+    return None
+
+
+def _millions(value: float | None) -> str:
+    """Show statement arithmetic in millions, the unit used by the tables."""
+    if value is None:
+        return "N/A"
+    return f"{value / 1_000_000:,.0f}"
+
+
+def _eps(value: float | None) -> str:
+    return "N/A" if value is None else f"{value:.2f}"
+
+
+def _ratio_percent(numerator: float | None, denominator: float | None) -> str:
+    ratio = safe_ratio(numerator, denominator)
+    return "N/A" if ratio is None else f"{ratio * 100:.2f}%"
+
+
+def _multiple(value: float | None) -> str:
+    """Use the shared multiple formatter while keeping table cells compact."""
+    rendered = fmt_multiple(value)
+    return "N/A" if rendered is None else rendered.split("  [unit:", 1)[0]
+
+
+def _growth(new: float | None, old: float | None, *, money: bool) -> str:
+    """Render YoY growth with its operands so periods cannot be mixed up."""
+    change = pct_change(new, old)
+    if change is None:
+        return "N/M"
+    display = _millions if money else _eps
+    return f"{change:.2f}%  (= {display(new)} / {display(old)} - 1)"
+
+
+def _financial_currency(ticker: yf.Ticker) -> str:
+    """Currency the statements are reported in.
+
+    ``financialCurrency`` can differ from the trading currency (a US-listed ADR
+    reporting in EUR), so naming it explicitly stops a reader from assuming USD
+    and comparing figures across two currencies as if they were one.
+    """
+    try:
+        info = yf_retry(lambda: ticker.info) or {}
+    except Exception:  # noqa: BLE001 -- the snapshot is still valid without a currency label
+        return "reporting currency"
+    return info.get("financialCurrency") or info.get("currency") or "reporting currency"
+
+
+def _latest_close(symbol: str, curr_date: str) -> float | None:
+    """Return the last close on or before the requested date, never inventing one."""
+    try:
+        data = load_ohlcv(symbol, curr_date)
+    except Exception:  # noqa: BLE001 -- valuation is optional when price data is unavailable
+        return None
+    if data is None or data.empty or "Close" not in data.columns:
+        return None
+    frame = data.copy()
+    if "Date" in frame.columns:
+        dates = pd.to_datetime(frame["Date"], errors="coerce")
+        frame = frame.loc[dates <= pd.Timestamp(curr_date)]
+    if frame.empty:
+        return None
+    try:
+        close = float(frame.iloc[-1]["Close"])
+    except (TypeError, ValueError):
+        return None
+    return None if pd.isna(close) else close
+
+
+def _append_income_sections(lines: list[str], annual: pd.DataFrame, currency: str) -> pd.Series | None:
+    revenue = _row(annual, "Total Revenue", "Operating Revenue")
+    gross_profit = _row(annual, "Gross Profit")
+    operating_income = _row(annual, "Operating Income", "Total Operating Income As Reported")
+    net_income = _row(annual, "Net Income", "Net Income Common Stockholders")
+    diluted_eps = _row(annual, "Diluted EPS")
+    basic_eps = _row(annual, "Basic EPS")
+    periods = _periods(revenue, gross_profit, operating_income, net_income, diluted_eps, basic_eps)
+    if not periods:
+        return diluted_eps
+
+    lines += ["", "### Annual income statement", "", f"Units: millions of {currency}, except per-share EPS.", "",
+              "| Fiscal year end | Revenue | Gross profit | Operating income | Net income | Diluted EPS |",
+              "|---|---:|---:|---:|---:|---:|"]
+    for period in periods:
+        lines.append(
+            f"| {period:%Y-%m-%d} | {_millions(_value(revenue, period))} | "
+            f"{_millions(_value(gross_profit, period))} | {_millions(_value(operating_income, period))} | "
+            f"{_millions(_value(net_income, period))} | {_eps(_value(diluted_eps, period))} |"
+        )
+
+    margin_rows: list[str] = []
+    for period in periods:
+        rev = _value(revenue, period)
+        cells = []
+        for measure in (gross_profit, operating_income, net_income):
+            amount = _value(measure, period)
+            percent = _ratio_percent(amount, rev)
+            cells.append("N/A" if percent == "N/A" else f"{percent}  ({_millions(amount)} / {_millions(rev)})")
+        if any(cell != "N/A" for cell in cells):
+            margin_rows.append(f"| {period:%Y-%m-%d} | " + " | ".join(cells) + " |")
+    if margin_rows:
+        lines += ["", "### Annual income-statement margins", "", f"Units in arithmetic: millions of {currency}.", "",
+                  "| Fiscal year end | Gross margin | Operating margin | Net margin |",
+                  "|---|---:|---:|---:|"] + margin_rows
+
+    growth_rows: list[str] = []
+    for index, period in enumerate(periods[:-1]):
+        older = periods[index + 1]
+        growth_rows.append(
+            f"| {period:%Y-%m-%d} vs {older:%Y-%m-%d} | "
+            f"{_growth(_value(revenue, period), _value(revenue, older), money=True)} | "
+            f"{_growth(_value(operating_income, period), _value(operating_income, older), money=True)} | "
+            f"{_growth(_value(net_income, period), _value(net_income, older), money=True)} | "
+            f"{_growth(_value(diluted_eps, period), _value(diluted_eps, older), money=False)} |"
+        )
+    if growth_rows:
+        lines += ["", "### Annual YoY growth", "", "| Fiscal years compared | Revenue | Operating income | Net income | Diluted EPS |",
+                  "|---|---:|---:|---:|---:|"] + growth_rows
+    return diluted_eps
+
+
+def _append_balance_section(lines: list[str], quarterly: pd.DataFrame, currency: str) -> None:
+    assets = _row(quarterly, "Total Assets")
+    liabilities = _row(quarterly, "Total Liabilities Net Minority Interest", "Total Liabilities")
+    equity = _row(quarterly, "Stockholders Equity", "Total Equity Gross Minority Interest")
+    total_debt = _row(quarterly, "Total Debt")
+    long_debt = _row(quarterly, "Long Term Debt")
+    cash = _row(quarterly, "Cash And Cash Equivalents", "Cash Cash Equivalents And Short Term Investments")
+    current_assets = _row(quarterly, "Current Assets", "Total Current Assets")
+    current_liabilities = _row(quarterly, "Current Liabilities", "Total Current Liabilities")
+    inventory = _row(quarterly, "Inventory")
+    period_list = _periods(assets, liabilities, equity, total_debt, long_debt, cash, current_assets, current_liabilities, inventory, limit=1)
+    if not period_list:
+        return
+    period = period_list[0]
+    items = (
+        ("Total assets", assets), ("Total liabilities", liabilities), ("Stockholders' equity", equity),
+        ("Total debt", total_debt), ("Long-term debt", long_debt), ("Cash and cash equivalents", cash),
+        ("Current assets", current_assets), ("Current liabilities", current_liabilities), ("Inventory", inventory),
+    )
+    present = [(label, _value(values, period)) for label, values in items if _value(values, period) is not None]
+    if not present:
+        return
+    lines += ["", f"### Balance sheet, most recent quarter ({period:%Y-%m-%d})", "", "| Line item | Value |", "|---|---:|"]
+    for label, value in present:
+        lines.append(f"| {label} | {fmt_money(value, currency) or 'N/A'} |")
+
+    debt, long_term, eq = _value(total_debt, period), _value(long_debt, period), _value(equity, period)
+    current, current_liab, inv = _value(current_assets, period), _value(current_liabilities, period), _value(inventory, period)
+    ratio_rows: list[str] = []
+    debt_ratio = safe_ratio(debt, eq)
+    if debt_ratio is not None:
+        ratio_rows.append(f"| Total debt / equity | {debt_ratio * 100:.2f}%  (= {debt_ratio:.4f}x)  ({_millions(debt)} / {_millions(eq)}) |")
+    long_ratio = safe_ratio(long_term, eq)
+    if long_ratio is not None:
+        ratio_rows.append(f"| Long-term debt / equity | {long_ratio * 100:.2f}%  (= {long_ratio:.4f}x)  ({_millions(long_term)} / {_millions(eq)}) |")
+    current_ratio = safe_ratio(current, current_liab)
+    if current_ratio is not None:
+        ratio_rows.append(f"| Current ratio | {_multiple(current_ratio)}  ({_millions(current)} / {_millions(current_liab)}) |")
+    quick_ratio = safe_ratio(None if current is None or inv is None else current - inv, current_liab)
+    if quick_ratio is not None:
+        ratio_rows.append(f"| Quick ratio | {_multiple(quick_ratio)}  (({_millions(current)} - {_millions(inv)}) / {_millions(current_liab)}) |")
+    if ratio_rows:
+        lines += ["", "| Ratio | Verified calculation |", "|---|---:|"] + ratio_rows
+        lines += ["", "Debt/equity is a balance-sheet ratio of borrowings to equity; goodwill and intangibles are assets and do not raise it."]
+
+
+def _append_cash_flow_section(lines: list[str], annual: pd.DataFrame, quarterly: pd.DataFrame, currency: str) -> None:
+    annual_ocf = _row(annual, "Operating Cash Flow", "Total Cash From Operating Activities")
+    annual_capex = _row(annual, "Capital Expenditure", "Capital Expenditures")
+    annual_fcf = _row(annual, "Free Cash Flow")
+    periods = _periods(annual_ocf, annual_capex, annual_fcf)
+    if periods:
+        lines += ["", "### Cash flow — annual", "", f"Capex is shown as spend using abs(yfinance capex), in millions of {currency}.", "",
+                  "| Fiscal year end | Operating cash flow | Capex spend | Free cash flow | OCF YoY | Capex YoY | FCF YoY |",
+                  "|---|---:|---:|---:|---:|---:|---:|"]
+        for index, period in enumerate(periods):
+            ocf, capex, fcf = _value(annual_ocf, period), _value(annual_capex, period), _value(annual_fcf, period)
+            capex_spend = None if capex is None else abs(capex)
+            if index + 1 < len(periods):
+                older = periods[index + 1]
+                old_ocf = _value(annual_ocf, older)
+                old_capex = _value(annual_capex, older)
+                old_fcf = _value(annual_fcf, older)
+                growths = (_growth(ocf, old_ocf, money=True), _growth(capex_spend, None if old_capex is None else abs(old_capex), money=True), _growth(fcf, old_fcf, money=True))
+            else:
+                growths = ("N/A", "N/A", "N/A")
+            lines.append(
+                f"| {period:%Y-%m-%d} | {_millions(ocf)} | {_millions(capex_spend)} | {_millions(fcf)} | "
+                + " | ".join(growths) + " |"
+            )
+
+    q_ocf = _row(quarterly, "Operating Cash Flow", "Total Cash From Operating Activities")
+    q_capex = _row(quarterly, "Capital Expenditure", "Capital Expenditures")
+    q_fcf = _row(quarterly, "Free Cash Flow")
+    quarter_periods = _periods(q_ocf, q_capex, q_fcf, limit=100)
+    if quarter_periods:
+        latest = quarter_periods[0]
+        comparison = next((date for date in quarter_periods if date.year == latest.year - 1 and date.month == latest.month), None)
+        if comparison is not None:
+            lines += ["", f"### Cash flow — quarterly YoY ({latest:%Y-%m-%d} vs {comparison:%Y-%m-%d})", "",
+                      "| Metric | Most recent quarter | Same quarter one year earlier | YoY |", "|---|---:|---:|---:|"]
+            for label, values, is_capex in (("Operating cash flow", q_ocf, False), ("Capex spend", q_capex, True), ("Free cash flow", q_fcf, False)):
+                latest_value, old_value = _value(values, latest), _value(values, comparison)
+                if is_capex:
+                    latest_value = None if latest_value is None else abs(latest_value)
+                    old_value = None if old_value is None else abs(old_value)
+                if latest_value is None and old_value is None:
+                    continue
+                lines.append(f"| {label} | {_millions(latest_value)} | {_millions(old_value)} | {_growth(latest_value, old_value, money=True)} |")
+
+    if periods or quarter_periods:
+        lines += ["", "> Capex and free-cash-flow growth rates differ between the annual and quarterly views. State which one you are quoting, with the period. Do not describe a +83.5% quarterly change as \"doubled\"."]
+
+
+def _append_price_statistics_section(lines: list[str], symbol: str, curr_date: str, currency: str) -> None:
+    """Restate the market snapshot's price statistics, from the same source.
+
+    The fundamentals report needs a 50-day average and a 52-week range, and the
+    vendor's ``info`` dict offers both — computed on its own schedule and
+    adjustment basis. Taking them from there put a 50-day average of 512.95 in
+    the fundamentals section of a report whose technical section said 514.33.
+    These come from the same settled OHLCV frame the market snapshot uses, so
+    the two sections cannot disagree.
+    """
+    # Imported here rather than at module scope: the market validator imports
+    # nothing from this module today, and a top-level import would make that
+    # relationship a cycle the first time it does.
+    from tradingagents.dataflows.market_data_validator import get_trade_reference_levels
+
+    ref = get_trade_reference_levels(symbol, curr_date)
+    if ref is None:
+        return
+    rows = [
+        ("Last close", ref.close),
+        ("50-day SMA", ref.sma50),
+        ("200-day SMA", ref.sma200),
+        ("52-week high", ref.week52_high),
+        ("52-week low", ref.week52_low),
+        ("ATR (daily volatility)", ref.atr),
+    ]
+    present = [(label, value) for label, value in rows if value is not None]
+    if not present:
+        return
+    lines += [
+        "",
+        f"### Price statistics (as of {ref.as_of}, bar status {ref.bar_status})",
+        "",
+        "| Statistic | Value |",
+        "|---|---:|",
+    ]
+    for label, value in present:
+        lines.append(f"| {label} | {fmt_price(value, currency) or 'N/A'} |")
+    lines += [
+        "",
+        "These are computed from the same settled daily bars as the verified market "
+        "snapshot, so both reports quote identical numbers. Do not substitute a "
+        "vendor quote-feed moving average or 52-week figure for these — that is how "
+        "one statistic ends up with two values in one report.",
+    ]
+
+
+def _append_valuation_section(lines: list[str], price: float | None, annual_eps: pd.Series | None, quarterly: pd.DataFrame, currency: str) -> None:
+    if price is None:
+        return
+    annual_periods = _periods(annual_eps, limit=1)
+    quarterly_eps = _row(quarterly, "Diluted EPS")
+    quarter_periods = _periods(quarterly_eps)
+    rows: list[tuple[str, float]] = []
+    if annual_periods:
+        annual_value = _value(annual_eps, annual_periods[0])
+        if annual_value is not None and annual_value > 0:
+            rows.append((f"FY{annual_periods[0].year} GAAP diluted", annual_value))
+    if len(quarter_periods) >= 4:
+        values = [_value(quarterly_eps, period) for period in quarter_periods[:4]]
+        if all(value is not None for value in values):
+            ttm_eps = sum(values)  # type: ignore[arg-type]
+            if ttm_eps > 0:
+                rows.append(("TTM GAAP diluted (sum of last 4 quarters)", ttm_eps))
+    if not rows:
+        return
+    lines += ["", "### Valuation conversion reference", "", f"Reference price used: {fmt_price(price, currency) or 'N/A'}.", "",
+              f"| EPS basis | EPS | P/E at {price:.2f} |", "|---|---:|---:|"]
+    for basis, eps in rows:
+        lines.append(f"| {basis} | {_eps(eps)} | {_multiple(safe_ratio(price, eps))} |")
+
+    fy_row = next(((basis, eps) for basis, eps in rows if basis.startswith("FY")), None)
+    if fy_row is not None:
+        basis, eps = fy_row
+        example_price = price * 0.85
+        example_multiple = safe_ratio(example_price, eps)
+        lines += ["", f"To state a P/E at any other price P, compute P / EPS_basis using a row above and name the basis. A price of {example_price:.2f} is {_multiple(example_multiple)} {basis} EPS — it is not \"about 40x 2025 PE\". Never quote a P/E without naming its EPS basis and period."]
+
+    # The TTM row is summed from four quarterly diluted EPS figures, so it can
+    # differ by a few cents from a vendor's own trailing EPS field (which
+    # reweights the share count rather than adding rounded quarters). Saying so
+    # keeps a reader from presenting the two as a contradiction — or from
+    # quietly averaging them into a third number that matches no source.
+    if any(basis.startswith("TTM") for basis, _ in rows):
+        lines += [
+            "",
+            "The TTM row is the sum of the last four reported quarterly diluted EPS "
+            "figures. A vendor's own trailing-EPS field may differ by a few cents "
+            "because it reweights the diluted share count instead of adding rounded "
+            "quarters. Both are legitimate; cite one, name which, and do not blend them.",
+        ]
+
+
+def build_verified_fundamentals_snapshot(
+    symbol: str,
+    curr_date: str,
+    reference_price: float | None = None,
+) -> str:
+    """Render date-safe statement facts and deterministic fundamental ratios."""
+    canonical = normalize_symbol(symbol)
+    ticker = yf.Ticker(canonical)
+    annual_income = _statement(ticker, "income_stmt", curr_date)
+    quarterly_income = _statement(ticker, "quarterly_income_stmt", curr_date)
+    annual_balance = _statement(ticker, "balance_sheet", curr_date)
+    quarterly_balance = _statement(ticker, "quarterly_balance_sheet", curr_date)
+    annual_cashflow = _statement(ticker, "cashflow", curr_date)
+    quarterly_cashflow = _statement(ticker, "quarterly_cashflow", curr_date)
+    statements: Iterable[pd.DataFrame] = (annual_income, quarterly_income, annual_balance, quarterly_balance, annual_cashflow, quarterly_cashflow)
+    if not any(not statement.empty and len(statement.columns) for statement in statements):
+        raise ValueError(f"No usable statement data available for {symbol}.")
+
+    lines = [
+        f"## Verified fundamentals snapshot for {symbol.upper()}",
+        "",
+        f"- Requested analysis date: {curr_date}",
+        "- Statement columns dated after the requested date are excluded.",
+        "- Every ratio below is computed in Python from the line items shown. The arithmetic is printed so it can be checked.",
+    ]
+    currency = _financial_currency(ticker)
+    annual_eps = _append_income_sections(lines, annual_income, currency)
+    _append_balance_section(lines, quarterly_balance, currency)
+    _append_cash_flow_section(lines, annual_cashflow, quarterly_cashflow, currency)
+    _append_price_statistics_section(lines, symbol, curr_date, currency)
+    price = reference_price if reference_price is not None else _latest_close(symbol, curr_date)
+    _append_valuation_section(lines, price, annual_eps, quarterly_income, currency)
+    lines += [
+        "",
+        "Use this snapshot as the source of truth for every fundamental ratio, growth rate, and valuation multiple. Quote these figures; do not recompute them and do not carry a ratio from any other tool output, news summary, or social-media post into this report as fact. If another source states a figure that conflicts with this snapshot, report the conflict and name both sources rather than reconciling them. Every percentage you cite must name its period and its basis.",
+    ]
+    return "\n".join(lines)

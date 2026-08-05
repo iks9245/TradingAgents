@@ -5,6 +5,7 @@ import pandas as pd
 import yfinance as yf
 from dateutil.relativedelta import relativedelta
 
+from .fundamental_units import render_field
 from .stockstats_utils import (
     StockstatsUtils,
     _assert_ohlcv_not_stale,
@@ -271,11 +272,76 @@ def get_stockstats_indicator(
     return str(indicator_value)
 
 
+# yfinance's ``info`` dict is a flat namespace holding three different numeric
+# conventions (fractions, percents, bare multiples) and two different reporting
+# periods (TTM and most-recent-quarter), none of them labelled. Each row below
+# pins a field to its unit kind and states its period in the label, so a reader
+# can neither misread the unit nor paste a TTM value into a fiscal-year table.
+#
+#   label, info key, unit kind (see dataflows.fundamental_units.FORMATTERS)
+_FUNDAMENTAL_FIELDS: tuple[tuple[str, str, str], ...] = (
+    ("Name", "longName", "text"),
+    ("Sector", "sector", "text"),
+    ("Industry", "industry", "text"),
+    ("Quote currency", "currency", "text"),
+    ("Market Cap", "marketCap", "money"),
+    ("PE Ratio (TTM, GAAP diluted)", "trailingPE", "multiple"),
+    ("Forward PE (analyst estimate)", "forwardPE", "multiple"),
+    ("PEG Ratio", "pegRatio", "multiple"),
+    ("Price to Book (MRQ)", "priceToBook", "multiple"),
+    ("EPS (TTM, GAAP diluted)", "trailingEps", "price"),
+    ("Forward EPS (analyst estimate)", "forwardEps", "price"),
+    ("Dividend Yield", "dividendYield", "raw"),
+    ("Beta (5Y monthly)", "beta", "plain"),
+    # 52-week extremes and moving averages are deliberately NOT listed here.
+    # See _PRICE_STATISTICS_NOTE below.
+    ("Revenue (TTM)", "totalRevenue", "money"),
+    ("Gross Profit (TTM)", "grossProfits", "money"),
+    ("EBITDA (TTM)", "ebitda", "money"),
+    ("Net Income to Common (TTM)", "netIncomeToCommon", "money"),
+    ("Profit Margin (TTM)", "profitMargins", "fraction_pct"),
+    ("Operating Margin (TTM)", "operatingMargins", "fraction_pct"),
+    ("Return on Equity (TTM)", "returnOnEquity", "fraction_pct"),
+    ("Return on Assets (TTM)", "returnOnAssets", "fraction_pct"),
+    ("Debt to Equity (MRQ)", "debtToEquity", "percent_and_multiple"),
+    ("Current Ratio (MRQ)", "currentRatio", "multiple"),
+    ("Book Value per Share (MRQ)", "bookValue", "price"),
+    ("Free Cash Flow (TTM)", "freeCashflow", "money"),
+)
+
+# Why the price statistics are gone: yfinance's ``fiftyDayAverage`` and
+# ``fiftyTwoWeekHigh`` are computed by the quote feed on its own schedule and
+# adjustment basis, while the technical snapshot computes the same statistics
+# from settled daily bars. Emitting both put two different numbers for one
+# statistic into a single report — a 50-day average appeared as 514.33 in the
+# technical section and 512.95 in the fundamentals section, with nothing saying
+# why. One statistic, one source: price levels come from the market snapshot.
+_PRICE_STATISTICS_NOTE = (
+    "# - Price statistics (moving averages, 52-week high/low) are NOT in this\n"
+    "#   block. They come from the verified market snapshot, which computes them\n"
+    "#   from settled daily bars. Quoting a second vendor's version of the same\n"
+    "#   statistic would put two numbers for one figure in the report.\n"
+)
+
+_FUNDAMENTALS_PREAMBLE = (
+    "# HOW TO READ THIS BLOCK\n"
+    "# - Every value carries its unit inline. Quote the unit as written; never\n"
+    "#   restate a percentage as a multiple or vice versa.\n"
+    "# - The period in each label is binding. (TTM) is trailing-twelve-month and\n"
+    "#   (MRQ) is most-recent-quarter. Neither is a fiscal-year figure: do NOT\n"
+    "#   place a (TTM) or (MRQ) value in a row labelled with a fiscal year.\n"
+    "# - For fiscal-year figures and for any ratio computed from them, use\n"
+    "#   `get_verified_fundamentals_snapshot`, which recomputes them from the\n"
+    "#   statements and shows its arithmetic. Do not divide these fields yourself.\n"
+    + _PRICE_STATISTICS_NOTE
+)
+
+
 def get_fundamentals(
     ticker: Annotated[str, "ticker symbol of the company"],
     curr_date: Annotated[str, "current date (not used for yfinance)"] = None
 ):
-    """Get company fundamentals overview from yfinance."""
+    """Get company fundamentals overview from yfinance, with units and periods labelled."""
     canonical = normalize_symbol(ticker)
     try:
         ticker_obj = yf.Ticker(canonical)
@@ -284,41 +350,16 @@ def get_fundamentals(
         if not info:
             raise NoMarketDataError(ticker, canonical, "no fundamentals returned")
 
-        fields = [
-            ("Name", info.get("longName")),
-            ("Sector", info.get("sector")),
-            ("Industry", info.get("industry")),
-            ("Market Cap", info.get("marketCap")),
-            ("PE Ratio (TTM)", info.get("trailingPE")),
-            ("Forward PE", info.get("forwardPE")),
-            ("PEG Ratio", info.get("pegRatio")),
-            ("Price to Book", info.get("priceToBook")),
-            ("EPS (TTM)", info.get("trailingEps")),
-            ("Forward EPS", info.get("forwardEps")),
-            ("Dividend Yield", info.get("dividendYield")),
-            ("Beta", info.get("beta")),
-            ("52 Week High", info.get("fiftyTwoWeekHigh")),
-            ("52 Week Low", info.get("fiftyTwoWeekLow")),
-            ("50 Day Average", info.get("fiftyDayAverage")),
-            ("200 Day Average", info.get("twoHundredDayAverage")),
-            ("Revenue (TTM)", info.get("totalRevenue")),
-            ("Gross Profit", info.get("grossProfits")),
-            ("EBITDA", info.get("ebitda")),
-            ("Net Income", info.get("netIncomeToCommon")),
-            ("Profit Margin", info.get("profitMargins")),
-            ("Operating Margin", info.get("operatingMargins")),
-            ("Return on Equity", info.get("returnOnEquity")),
-            ("Return on Assets", info.get("returnOnAssets")),
-            ("Debt to Equity", info.get("debtToEquity")),
-            ("Current Ratio", info.get("currentRatio")),
-            ("Book Value", info.get("bookValue")),
-            ("Free Cash Flow", info.get("freeCashflow")),
-        ]
+        currency = info.get("currency") or "USD"
 
         lines = []
-        for label, value in fields:
-            if value is not None:
-                lines.append(f"{label}: {value}")
+        for label, key, kind in _FUNDAMENTAL_FIELDS:
+            rendered = render_field(
+                kind, info.get(key), raw_field=key, currency=currency
+            )
+            if rendered is None:
+                continue
+            lines.append(f"{label}: {rendered}")
 
         # yfinance returns a stub dict (e.g. {"trailingPegRatio": None}) for
         # unknown symbols, so `info` is truthy but every field is empty. Treat
@@ -328,7 +369,8 @@ def get_fundamentals(
             raise NoMarketDataError(ticker, canonical, "no fundamental fields returned")
 
         header = f"# Company Fundamentals for {canonical}\n"
-        header += f"# Data retrieved on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+        header += f"# Data retrieved on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+        header += _FUNDAMENTALS_PREAMBLE + "\n"
 
         return header + "\n".join(lines)
 
