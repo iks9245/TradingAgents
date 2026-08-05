@@ -17,6 +17,7 @@ from tradingagents.agents.managers.research_manager import create_research_manag
 from tradingagents.agents.schemas import (
     PortfolioDecision,
     PortfolioRating,
+    PositionIntent,
     ResearchPlan,
     SentimentBand,
     SentimentReport,
@@ -36,7 +37,11 @@ from tradingagents.agents.trader.trader import create_trader
 @pytest.mark.unit
 class TestRenderTraderProposal:
     def test_minimal_required_fields(self):
-        p = TraderProposal(action=TraderAction.HOLD, reasoning="Balanced setup; no edge.")
+        p = TraderProposal(
+            action=TraderAction.HOLD,
+            position_intent=PositionIntent.NO_CHANGE,
+            reasoning="Balanced setup; no edge.",
+        )
         md = render_trader_proposal(p)
         assert "**Action**: Hold" in md
         assert "**Reasoning**: Balanced setup; no edge." in md
@@ -47,6 +52,7 @@ class TestRenderTraderProposal:
     def test_optional_fields_included_when_present(self):
         p = TraderProposal(
             action=TraderAction.BUY,
+            position_intent=PositionIntent.OPEN_LONG,
             reasoning="Strong technicals + fundamentals.",
             entry_price=189.5,
             stop_loss=178.0,
@@ -60,7 +66,11 @@ class TestRenderTraderProposal:
         assert "FINAL TRANSACTION PROPOSAL: **BUY**" in md
 
     def test_optional_fields_omitted_when_absent(self):
-        p = TraderProposal(action=TraderAction.SELL, reasoning="Guidance cut.")
+        p = TraderProposal(
+            action=TraderAction.SELL,
+            position_intent=PositionIntent.REDUCE_LONG,
+            reasoning="Guidance cut.",
+        )
         md = render_trader_proposal(p)
         assert "Entry Price" not in md
         assert "Stop Loss" not in md
@@ -77,6 +87,7 @@ class TestNullishFloatCoercion:
         for sentinel in ("None", "N/A", "null", "-", "", "TBD"):
             p = TraderProposal(
                 action=TraderAction.HOLD,
+                position_intent=PositionIntent.NO_CHANGE,
                 reasoning="x",
                 entry_price=sentinel,
                 stop_loss=sentinel,
@@ -85,7 +96,12 @@ class TestNullishFloatCoercion:
             assert p.stop_loss is None
 
     def test_trader_real_numeric_string_still_parses(self):
-        p = TraderProposal(action=TraderAction.BUY, reasoning="x", entry_price="189.5")
+        p = TraderProposal(
+            action=TraderAction.BUY,
+            position_intent=PositionIntent.OPEN_LONG,
+            reasoning="x",
+            entry_price="189.5",
+        )
         assert p.entry_price == 189.5
 
     def test_pm_nullish_price_target_coerces_to_none(self):
@@ -141,6 +157,7 @@ def _structured_trader_llm(captured: dict, proposal: TraderProposal | None = Non
     if proposal is None:
         proposal = TraderProposal(
             action=TraderAction.BUY,
+            position_intent=PositionIntent.OPEN_LONG,
             reasoning="Strong setup.",
         )
     structured = MagicMock()
@@ -176,6 +193,7 @@ class TestTraderAgent:
         captured = {}
         proposal = TraderProposal(
             action=TraderAction.BUY,
+            position_intent=PositionIntent.OPEN_LONG,
             reasoning="AI capex cycle intact; institutional flows constructive.",
             entry_price=189.5,
             stop_loss=178.0,

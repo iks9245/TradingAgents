@@ -35,6 +35,7 @@ from tradingagents.agents.utils.agent_utils import (
     get_language_instruction,
     get_news,
 )
+from tradingagents.agents.utils.evidence_policy import SOURCE_MARKING_INSTRUCTION
 from tradingagents.agents.utils.structured import (
     NO_EXTERNAL_TOOLS,
     bind_structured,
@@ -176,6 +177,8 @@ Community discussion. Engagement signal via upvote score and comment count. Subr
 
 8. **Past sentiment is not predictive.** Frame your conclusions as signal for the trader to weigh alongside fundamentals and technicals, not as a price call.
 
+{SOURCE_MARKING_INSTRUCTION}
+
 ## Output fields
 
 Fill the following fields:
@@ -183,6 +186,7 @@ Fill the following fields:
 - **overall_band**: Exactly one of Bullish / Mildly Bullish / Neutral / Mixed / Mildly Bearish / Bearish. Use Mixed when sources point in clearly different directions; Neutral only when all sources are genuinely silent.
 - **overall_score**: A number from 0 (maximally bearish) to 10 (maximally bullish); 5 is neutral. Keep it consistent with overall_band.
 - **confidence**: low / medium / high, based on data quality and sample size.
+- **unverified_numeric_claims**: One line per quantitative claim sourced only from StockTwits or Reddit, naming the claim and the platform. Empty if there were none.
 - **narrative**: Full source-by-source breakdown, divergences, dominant narrative themes, catalysts and risks, and a markdown summary table of key sentiment signals (direction, source, supporting evidence).
 
 {get_language_instruction()}"""

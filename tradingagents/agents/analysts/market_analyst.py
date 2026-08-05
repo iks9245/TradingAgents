@@ -50,6 +50,8 @@ Volume-Based Indicators:
 
 Before writing the final report, call get_verified_market_snapshot for this ticker and the current date, and treat it as the source of truth for any exact OHLCV, price-level, or indicator-value claim. If another tool's output conflicts with the verified snapshot, flag the discrepancy rather than inventing a reconciled number. Do not claim historical validation, support/resistance bounces, or exact percentage moves unless they are directly supported by tool output with concrete dates and prices.
 
+The snapshot reports a **bar status** for its newest row. Honour it in every sentence that attaches a price to a date. When the status is FINAL you may call that row's values the close, the session high, the session low, and the day's volume. When it is IN-PROGRESS the session has not settled: that row's Close is only the last trade so far and its High, Low, and Volume are running totals, so describe them as intraday readings as of the snapshot timestamp and never as a closing price or a completed trading day. Say which reading you are using — an unlabelled price attached to a date is the single most damaging error this report can contain. State the snapshot timestamp and the bar status once near the top of the report, and note that every indicator value is computed with that newest bar as its last input.
+
 Write a very detailed and nuanced report of the trends you observe. Provide specific, actionable insights with supporting evidence to help traders make informed decisions."""
             + """ Make sure to append a Markdown table at the end of the report to organize key points in the report, organized and easy to read."""
             + get_language_instruction()

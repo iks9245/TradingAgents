@@ -208,7 +208,31 @@ def _write_markdown_tree(final_state: dict, ticker: str, save_path) -> Path:
             (portfolio_dir / "decision.md").write_text(risk["judge_decision"], encoding="utf-8")
             sections.append(f"## V. Portfolio Manager Decision\n\n### Portfolio Manager\n{risk['judge_decision']}")
 
+    # Lint the assembled body before writing it. This catches a concrete class
+    # of LLM copy errors (for example, a 14.4% operating margin beside operands
+    # that calculate to 10.66%) without risking the completed report itself.
+    body = "\n\n".join(sections)
+    warning_block = ""
+    try:
+        from tradingagents.report_lint import lint_report, render_warning_block
+
+        findings = lint_report(body)
+        warning_block = render_warning_block(findings)
+        if findings:
+            (save_path / "numeric_warnings.md").write_text(warning_block, encoding="utf-8")
+    except Exception as exc:
+        logger.warning(
+            "Could not lint the numeric consistency of the markdown report "
+            "(the report at %s is unaffected): %s",
+            save_path / "complete_report.md",
+            exc,
+        )
+
     # Write consolidated report
     header = f"# Trading Analysis Report: {ticker}\n\nGenerated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
-    (save_path / "complete_report.md").write_text(header + "\n\n".join(sections), encoding="utf-8")
+    report = header
+    if warning_block:
+        report += f"{warning_block}\n\n"
+    report += body
+    (save_path / "complete_report.md").write_text(report, encoding="utf-8")
     return save_path / "complete_report.md"
