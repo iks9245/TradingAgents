@@ -224,6 +224,16 @@ OPENAI_COMPATIBLE_PROVIDERS: dict[str, ProviderSpec] = {
     "kimi":       ProviderSpec(base_url="https://api.moonshot.ai/v1"),
     "groq":       ProviderSpec(base_url="https://api.groq.com/openai/v1"),
     "nvidia":     ProviderSpec(base_url="https://integrate.api.nvidia.com/v1"),
+    # Xiaomi MiMo exposes the OpenAI Chat Completions protocol at this endpoint.
+    "mimo":       ProviderSpec(base_url="https://token-plan-cn.xiaomimimo.com/v1"),
+    # oMLX is a local OpenAI-compatible server. Use the local-compatible
+    # client because tool-calling support can vary by served MLX model.
+    "omlx":       ProviderSpec(
+        base_url="http://127.0.0.1:11123/v1",
+        key_optional=True,
+        placeholder_key="omlx",
+        chat_class=LocalCompatibleChatOpenAI,
+    ),
     "ollama":     ProviderSpec(base_url="http://localhost:11434/v1", base_url_env="OLLAMA_BASE_URL",
                                key_optional=True, placeholder_key="ollama"),
     # Generic endpoint: user supplies base_url; key optional (keyless local).
