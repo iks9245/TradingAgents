@@ -35,7 +35,10 @@ PROVIDER_API_KEY_ENV: dict[str, str | None] = {
     "kimi":       "MOONSHOT_API_KEY",
     "groq":       "GROQ_API_KEY",
     "nvidia":     "NVIDIA_API_KEY",
+    "mimo":       "MIMO_API_KEY",
     # Local runtimes do not authenticate.
+    # oMLX is normally local but deployments may enable bearer-token auth.
+    "omlx":       "OMLX_API_KEY",
     "ollama":     None,
     # Generic OpenAI-compatible endpoint: the client reads this when set (keyed
     # relays), but it is marked key-optional in the provider registry so the CLI

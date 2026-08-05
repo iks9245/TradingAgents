@@ -78,6 +78,31 @@ _MINIMAX_MODELS: dict[str, list[ModelOption]] = {
 }
 
 
+# Xiaomi MiMo models served by token-plan-cn.xiaomimimo.com through the
+# OpenAI-compatible Chat Completions API.
+_MIMO_MODELS: dict[str, list[ModelOption]] = {
+    "quick": [
+        ("MiMo v2.5 - Fast general-purpose model", "mimo-v2.5"),
+    ],
+    "deep": [
+        ("MiMo v2.5 Pro - Higher-quality reasoning model", "mimo-v2.5-pro"),
+        ("MiMo v2.5 - General-purpose alternative", "mimo-v2.5"),
+    ],
+}
+
+
+# Local oMLX server models. These names are sent unchanged to the server.
+_OMLX_MODELS: dict[str, list[ModelOption]] = {
+    "quick": [
+        ("Qwen3.6 35B-A3B oQ6 - Efficient local general-purpose model", "Qwen3.6-35B-A3B-oQ6"),
+    ],
+    "deep": [
+        ("Qwen3 Coder Next MLX 4-bit - Local coding/reasoning model", "Qwen3-Coder-Next-MLX-4bit"),
+        ("Qwen3.6 35B-A3B oQ6 - General-purpose alternative", "Qwen3.6-35B-A3B-oQ6"),
+    ],
+}
+
+
 MODEL_OPTIONS: ProviderModeOptions = {
     "openai": {
         "quick": [
@@ -153,6 +178,8 @@ MODEL_OPTIONS: ProviderModeOptions = {
     # so the two provider keys share one model list.
     "minimax": _MINIMAX_MODELS,
     "minimax-cn": _MINIMAX_MODELS,
+    "mimo": _MIMO_MODELS,
+    "omlx": _OMLX_MODELS,
     # OpenRouter: fetched dynamically. Azure: any deployed model name.
     # Ollama display labels intentionally omit a "local" marker — the
     # endpoint is now configurable via OLLAMA_BASE_URL, so the same labels
