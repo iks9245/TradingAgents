@@ -283,6 +283,30 @@ What does not vary anymore: the analyzed company identity is resolved determinis
 
 Backtest results are not guaranteed to match any published figure. Returns depend on the model, the temperature, the date range, data quality, and the sampling above. Treat the framework as a research scaffold for studying multi-agent analysis, not as a strategy with a fixed, replicable return.
 
+## Backtesting
+
+Since returns depend on your model, universe, and date range, the framework ships a harness for measuring them yourself. It scores the pipeline's ratings against the realized forward return and compares them — paired, on an identical grid of (ticker, date) points — against baselines that cost nothing to run: buy-and-hold, uniform-random ratings, and the pipeline's own rating distribution randomly reassigned.
+
+```bash
+# Free: no API key, no LLM calls. Establishes what noise looks like on your grid.
+python -m tradingagents.backtest --start 2024-01-01 --baselines-only
+
+# Estimate the cost of a real run before spending anything.
+python -m tradingagents.backtest --start 2025-06-01 --universe mixed --dry-run
+
+# The real thing: resumable, out-of-sample only, full markdown report.
+python -m tradingagents.backtest \
+    --start 2025-06-01 --universe mixed \
+    --knowledge-cutoff 2025-03-01 \
+    --cache runs/bt.jsonl --out runs/report.md
+```
+
+One evaluation point is one full multi-agent run, so always `--dry-run` first and always pass `--cache` — every rating is written to disk as it is produced, and an interrupted run resumes rather than re-spending.
+
+Two things the harness is deliberate about. Confidence intervals are bootstrapped **clustering on the decision date**, because same-day decisions across tickers share a market factor and are not independent observations. And `--knowledge-cutoff` flags evaluation dates that precede your model's training cutoff, reporting them separately: on those dates the model may recall the outcome rather than forecast it, which no amount of data-layer look-ahead filtering can prevent.
+
+See [`docs/backtesting.md`](docs/backtesting.md) for the methodology, how to read the report, and how to run ablations.
+
 ## Contributing
 
 Contributions are welcome: bug fixes, documentation, and feature ideas; past contributions are credited per release in [`CHANGELOG.md`](CHANGELOG.md).
