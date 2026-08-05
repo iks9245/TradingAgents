@@ -7,6 +7,7 @@ from tradingagents.agents.utils.agent_utils import (
     get_income_statement,
     get_instrument_context_from_state,
     get_language_instruction,
+    get_verified_fundamentals_snapshot,
 )
 
 
@@ -20,12 +21,28 @@ def create_fundamentals_analyst(llm):
             get_balance_sheet,
             get_cashflow,
             get_income_statement,
+            get_verified_fundamentals_snapshot,
         ]
 
         system_message = (
             "You are a researcher tasked with analyzing fundamental information over the past week about a company. Please write a comprehensive report of the company's fundamental information such as financial documents, company profile, basic company financials, and company financial history to gain a full view of the company's fundamental information to inform traders. Make sure to include as much detail as possible. Provide specific, actionable insights with supporting evidence to help traders make informed decisions."
             + " Make sure to append a Markdown table at the end of the report to organize key points in the report, organized and easy to read."
             + " Use the available tools: `get_fundamentals` for comprehensive company analysis, `get_balance_sheet`, `get_cashflow`, and `get_income_statement` for specific financial statements."
+            # Derived fundamentals are where this agent has historically gone
+            # wrong: dividing statement lines in-head, misreading a vendor's
+            # percent as a multiple, and pasting a TTM ratio into a fiscal-year
+            # row. The snapshot computes those in Python and shows its work, so
+            # the instruction is to quote it rather than to recompute.
+            + " Before writing the final report, call `get_verified_fundamentals_snapshot`"
+            " for this ticker and the current date, and treat it as the source of truth for"
+            " every margin, growth rate, leverage ratio, liquidity ratio, and valuation"
+            " multiple. Quote its figures rather than deriving your own: do not divide"
+            " statement line items yourself, and do not restate a value in a different unit"
+            " than the one the tool printed. Each figure you cite must carry the period the"
+            " tool gave it — a value labelled (TTM) or (MRQ) must never be presented as a"
+            " fiscal-year figure, and a P/E must always name its EPS basis. If another tool"
+            " output, news item, or social-media post states a number that conflicts with the"
+            " snapshot, report the conflict and name both sources instead of reconciling them."
             + get_language_instruction(),
         )
 

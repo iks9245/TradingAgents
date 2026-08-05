@@ -21,7 +21,9 @@ from __future__ import annotations
 from enum import Enum
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+from tradingagents.agents.utils.evidence_policy import UNVERIFIED_MARKER
 
 # LLMs sometimes write a placeholder string ("None", "N/A", ...) into an optional
 # numeric field instead of omitting it. Coerce those to None so the structured
@@ -63,6 +65,42 @@ class TraderAction(str, Enum):
     BUY = "Buy"
     HOLD = "Hold"
     SELL = "Sell"
+
+
+class PositionIntent(str, Enum):
+    """What a Buy/Sell actually does to the book.
+
+    ``Sell`` is ambiguous on its own: it can mean opening a short or scaling
+    out of an existing long, and those two have opposite stop-loss geometry.
+    A shipped proposal mixed them — action Sell, entry 520, stop 540, sizing
+    "scale out of the existing long" — which is a short's stop attached to a
+    long's exit. Naming the intent makes the contradiction checkable.
+    """
+
+    OPEN_LONG = "Open or add to a long"
+    REDUCE_LONG = "Reduce or exit an existing long"
+    OPEN_SHORT = "Open or add to a short"
+    REDUCE_SHORT = "Reduce or cover an existing short"
+    NO_CHANGE = "No position change"
+
+
+# Which intents each action can legitimately express.
+_ACTION_INTENTS: dict[TraderAction, frozenset[PositionIntent]] = {
+    TraderAction.BUY: frozenset({PositionIntent.OPEN_LONG, PositionIntent.REDUCE_SHORT}),
+    TraderAction.SELL: frozenset({PositionIntent.REDUCE_LONG, PositionIntent.OPEN_SHORT}),
+    TraderAction.HOLD: frozenset({PositionIntent.NO_CHANGE}),
+}
+
+# Which side of the entry a protective stop must sit on. A stop protecting long
+# exposure is below the entry; a stop protecting short exposure is above it.
+# ``REDUCE_*`` keeps the residual position's geometry: trimming a long still
+# leaves a long to protect.
+_STOP_BELOW_ENTRY: dict[PositionIntent, bool] = {
+    PositionIntent.OPEN_LONG: True,
+    PositionIntent.REDUCE_LONG: True,
+    PositionIntent.OPEN_SHORT: False,
+    PositionIntent.REDUCE_SHORT: False,
+}
 
 
 # ---------------------------------------------------------------------------
@@ -130,6 +168,16 @@ class TraderProposal(BaseModel):
     action: TraderAction = Field(
         description="The transaction direction. Exactly one of Buy / Hold / Sell.",
     )
+    position_intent: PositionIntent = Field(
+        description=(
+            "What this action does to the book. Buy must be 'Open or add to a "
+            "long' or 'Reduce or cover an existing short'; Sell must be 'Reduce "
+            "or exit an existing long' or 'Open or add to a short'; Hold must be "
+            "'No position change'. Choose deliberately: a Sell that trims an "
+            "existing long and a Sell that opens a new short need stop-loss "
+            "levels on opposite sides of the entry price."
+        ),
+    )
     reasoning: str = Field(
         description=(
             "The case for this action, anchored in the analysts' reports and "
@@ -138,15 +186,28 @@ class TraderProposal(BaseModel):
     )
     entry_price: float | None = Field(
         default=None,
-        description="Optional entry price target in the instrument's quote currency.",
+        description=(
+            "Optional entry price target in the instrument's quote currency. "
+            "Must be consistent with the verified price levels in the prompt."
+        ),
     )
     stop_loss: float | None = Field(
         default=None,
-        description="Optional stop-loss price in the instrument's quote currency.",
+        description=(
+            "Optional stop-loss price in the instrument's quote currency. It must "
+            "sit BELOW entry_price when the intent is long-side (open or reduce a "
+            "long) and ABOVE entry_price when the intent is short-side. Size the "
+            "distance against the ATR given in the prompt — a stop closer than "
+            "1x ATR is inside normal daily noise and will usually be triggered."
+        ),
     )
     position_sizing: str | None = Field(
         default=None,
-        description="Optional sizing guidance, e.g. '5% of portfolio'.",
+        description=(
+            "Optional sizing guidance, e.g. '5% of portfolio'. Describe the same "
+            "operation named in position_intent — do not describe trimming a long "
+            "here while the intent says opening a short."
+        ),
     )
 
     @field_validator("entry_price", "stop_loss", mode="before")
@@ -154,9 +215,96 @@ class TraderProposal(BaseModel):
     def _nullish_float_to_none(cls, v):
         return _coerce_optional_float(v)
 
+    @model_validator(mode="after")
+    def _check_internal_consistency(self):
+        """Reject proposals whose fields contradict each other.
 
-def render_trader_proposal(proposal: TraderProposal) -> str:
-    """Render a TraderProposal to markdown.
+        Raising here makes the provider's structured-output layer surface the
+        error and retry, which is the right moment to fix a self-contradictory
+        trade — far better than shipping it and catching the contradiction in a
+        reader's head three reports later.
+        """
+        allowed = _ACTION_INTENTS.get(self.action, frozenset())
+        if self.position_intent not in allowed:
+            options = " or ".join(sorted(intent.value for intent in allowed))
+            raise ValueError(
+                f"action '{self.action.value}' cannot have position_intent "
+                f"'{self.position_intent.value}'. Use: {options}."
+            )
+
+        if self.entry_price is not None and self.stop_loss is not None:
+            stop_below = _STOP_BELOW_ENTRY.get(self.position_intent)
+            if stop_below is True and self.stop_loss >= self.entry_price:
+                raise ValueError(
+                    f"position_intent '{self.position_intent.value}' protects long "
+                    f"exposure, so stop_loss ({self.stop_loss}) must be BELOW "
+                    f"entry_price ({self.entry_price})."
+                )
+            if stop_below is False and self.stop_loss <= self.entry_price:
+                raise ValueError(
+                    f"position_intent '{self.position_intent.value}' protects short "
+                    f"exposure, so stop_loss ({self.stop_loss}) must be ABOVE "
+                    f"entry_price ({self.entry_price})."
+                )
+        return self
+
+
+# Below this many ATRs, a stop sits inside the instrument's ordinary daily
+# range and will usually be taken out by noise rather than by the thesis
+# failing.
+MIN_STOP_ATR_MULTIPLE = 1.0
+
+
+def render_risk_check(proposal: TraderProposal, levels) -> list[str]:
+    """Verify the proposal's levels against measured volatility, in Python.
+
+    The model states an ATR multiple in prose; this computes it. A shipped
+    report claimed a stop was "1-1.5x ATR" when the distance was 0.5x — the
+    kind of claim that reads as disciplined risk management while describing a
+    stop that daily noise would take out. ``levels`` is a
+    ``dataflows.market_data_validator.TradeReference`` or None.
+    """
+    if levels is None or proposal.entry_price is None or proposal.stop_loss is None:
+        return []
+
+    distance = abs(proposal.entry_price - proposal.stop_loss)
+    multiple = levels.atr_multiple(proposal.entry_price, proposal.stop_loss)
+
+    lines = [
+        "",
+        "**Risk Check** (computed from verified market data, not model-stated):",
+        f"- Reference close ({levels.as_of}, bar status {levels.bar_status}): "
+        + (f"{levels.close:,.2f}" if levels.close is not None else "N/A"),
+        "- ATR: " + (f"{levels.atr:,.2f}" if levels.atr else "N/A"),
+        f"- Stop distance: |{proposal.entry_price:,.2f} - {proposal.stop_loss:,.2f}| "
+        f"= {distance:,.2f}"
+        + (f" = {multiple:.2f}x ATR" if multiple is not None else ""),
+    ]
+    if multiple is not None and multiple < MIN_STOP_ATR_MULTIPLE:
+        lines.append(
+            f"- ⚠️ The stop is {multiple:.2f}x ATR from entry, inside the instrument's "
+            f"ordinary daily range. Normal noise is likely to trigger it before the "
+            f"thesis is tested. A stop of at least {MIN_STOP_ATR_MULTIPLE:.1f}x ATR "
+            f"would sit at "
+            + (
+                f"{proposal.entry_price - levels.atr:,.2f}"
+                if _STOP_BELOW_ENTRY.get(proposal.position_intent, True)
+                else f"{proposal.entry_price + levels.atr:,.2f}"
+            )
+            + "."
+        )
+    if levels.close is not None and proposal.entry_price is not None:
+        drift = abs(proposal.entry_price - levels.close)
+        if levels.atr and drift > 2 * levels.atr:
+            lines.append(
+                f"- ⚠️ The entry price is {drift:,.2f} ({drift / levels.atr:.1f}x ATR) "
+                f"away from the last verified close of {levels.close:,.2f}."
+            )
+    return lines
+
+
+def render_trader_proposal(proposal: TraderProposal, levels=None) -> str:
+    """Render a TraderProposal to markdown, with a computed risk check.
 
     The trailing ``FINAL TRANSACTION PROPOSAL: **BUY/HOLD/SELL**`` line is
     preserved for backward compatibility with the analyst stop-signal text
@@ -164,6 +312,8 @@ def render_trader_proposal(proposal: TraderProposal) -> str:
     """
     parts = [
         f"**Action**: {proposal.action.value}",
+        "",
+        f"**Position Intent**: {proposal.position_intent.value}",
         "",
         f"**Reasoning**: {proposal.reasoning}",
     ]
@@ -173,6 +323,7 @@ def render_trader_proposal(proposal: TraderProposal) -> str:
         parts.extend(["", f"**Stop Loss**: {proposal.stop_loss}"])
     if proposal.position_sizing:
         parts.extend(["", f"**Position Sizing**: {proposal.position_sizing}"])
+    parts.extend(render_risk_check(proposal, levels))
     parts.extend([
         "",
         f"FINAL TRANSACTION PROPOSAL: **{proposal.action.value.upper()}**",
@@ -309,6 +460,18 @@ class SentimentReport(BaseModel):
             "'high' when all three sources returned substantive data."
         ),
     )
+    unverified_numeric_claims: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Every quantitative claim you relayed whose only source is a "
+            "StockTwits or Reddit post — growth rates, margins, multiples, "
+            "cash-flow figures, price targets. One short line each, stating the "
+            "claim and the platform, e.g. 'free cash flow fell 39% — StockTwits "
+            "poster'. Downstream agents use this list to avoid restating these "
+            "numbers as fact. Empty list if the social sources made no "
+            "quantitative claims."
+        ),
+    )
     narrative: str = Field(
         description=(
             "Full sentiment report covering, in order: "
@@ -331,11 +494,31 @@ def render_sentiment_report(report: SentimentReport) -> str:
     The structured header (band + score + confidence) is prepended to the
     narrative so the saved report is both human-readable and machine-parseable
     without regex.
+
+    Unverified numeric claims are rendered as an explicit block rather than left
+    inside the prose. Downstream agents read this report as context, and a
+    number buried mid-paragraph gets lifted out and restated as fact — that is
+    how a StockTwits poster's cash-flow figure became a pillar of a shipped
+    Underweight rating.
     """
-    return "\n".join([
+    parts = [
         f"**Overall Sentiment:** **{report.overall_band.value}** "
         f"(Score: {report.overall_score:.1f}/10)",
         f"**Confidence:** {report.confidence.capitalize()}",
-        "",
-        report.narrative,
-    ])
+    ]
+    if report.unverified_numeric_claims:
+        parts += [
+            "",
+            "**Unverified numeric claims from social sources** — these are what "
+            "posters asserted, not measured facts. Do not restate them as fact or "
+            "use them to support a recommendation; where they conflict with the "
+            "verified fundamentals or market snapshot, the verified figure stands.",
+        ]
+        parts += [
+            f"- {claim.strip()} {UNVERIFIED_MARKER}"
+            if UNVERIFIED_MARKER not in claim
+            else f"- {claim.strip()}"
+            for claim in report.unverified_numeric_claims
+        ]
+    parts += ["", report.narrative]
+    return "\n".join(parts)

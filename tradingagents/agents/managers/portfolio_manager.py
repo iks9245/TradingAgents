@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from tradingagents.agents.schemas import PortfolioDecision, render_pm_decision
 from tradingagents.agents.utils.agent_utils import (
+    get_evidence_discipline_instruction,
     get_instrument_context_from_state,
     get_language_instruction,
 )
@@ -19,6 +20,10 @@ from tradingagents.agents.utils.structured import (
     NO_EXTERNAL_TOOLS,
     bind_structured,
     invoke_structured_or_freetext,
+)
+from tradingagents.dataflows.market_data_validator import (
+    get_trade_reference_levels,
+    render_trade_reference_block,
 )
 
 
@@ -39,6 +44,15 @@ def create_portfolio_manager(llm):
             if past_context
             else ""
         )
+
+        # The PM sets a price target but never sees the analyst reports — only
+        # the debate. Without verified levels it has invented valuation maths to
+        # justify the target ("$450 implies about 40x 2025 PE" when FY EPS made
+        # it 170x). Give it the price levels, and forbid multiples it cannot see.
+        levels = get_trade_reference_levels(
+            state["company_of_interest"], state.get("trade_date")
+        )
+        levels_block = render_trade_reference_block(levels)
 
         prompt = f"""As the Portfolio Manager, synthesize the risk analysts' debate and deliver the final trading decision.
 
@@ -62,9 +76,19 @@ def create_portfolio_manager(llm):
 
 ---
 
+{levels_block}
+
+**Valuation claims.** Do not state a P/E, EV/EBITDA, or any other valuation
+multiple unless that exact figure appears in the context above. You do not have
+the fundamentals report in this prompt, so you cannot derive one — a multiple you
+compute here would be a guess presented as arithmetic. If you set a price target,
+justify it against the verified price levels above, or against a figure quoted
+verbatim in the debate with its source named. Any multiple you do quote must name
+its EPS basis and period.
+
 Be decisive and ground every conclusion in specific evidence from the analysts.
 
-{NO_EXTERNAL_TOOLS}{get_language_instruction()}"""
+{NO_EXTERNAL_TOOLS}{get_evidence_discipline_instruction()}{get_language_instruction()}"""
 
         final_trade_decision = invoke_structured_or_freetext(
             structured_llm,

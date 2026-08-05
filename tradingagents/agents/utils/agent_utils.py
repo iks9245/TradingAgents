@@ -8,11 +8,17 @@ from langchain_core.messages import HumanMessage, RemoveMessage
 
 # Import tools from separate utility files
 from tradingagents.agents.utils.core_stock_tools import get_stock_data
+from tradingagents.agents.utils.evidence_policy import (
+    get_evidence_discipline_instruction,
+)
 from tradingagents.agents.utils.fundamental_data_tools import (
     get_balance_sheet,
     get_cashflow,
     get_fundamentals,
     get_income_statement,
+)
+from tradingagents.agents.utils.fundamental_validation_tools import (
+    get_verified_fundamentals_snapshot,
 )
 from tradingagents.agents.utils.macro_data_tools import get_macro_indicators
 from tradingagents.agents.utils.market_data_validation_tools import get_verified_market_snapshot
@@ -39,10 +45,12 @@ __all__ = [
     "get_macro_indicators",
     "get_prediction_markets",
     "get_verified_market_snapshot",
+    "get_verified_fundamentals_snapshot",
     "build_instrument_context",
     "resolve_instrument_identity",
     "get_instrument_context_from_state",
     "get_language_instruction",
+    "get_evidence_discipline_instruction",
     "create_msg_delete",
 ]
 

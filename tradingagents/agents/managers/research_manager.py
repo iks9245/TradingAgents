@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from tradingagents.agents.schemas import ResearchPlan, render_research_plan
 from tradingagents.agents.utils.agent_utils import (
+    get_evidence_discipline_instruction,
     get_instrument_context_from_state,
     get_language_instruction,
 )
@@ -43,7 +44,7 @@ Commit to a clear stance whenever the debate's strongest arguments warrant one; 
 **Debate History:**
 {history}
 
-{NO_EXTERNAL_TOOLS}""" + get_language_instruction()
+{NO_EXTERNAL_TOOLS}""" + get_evidence_discipline_instruction() + get_language_instruction()
 
         investment_plan = invoke_structured_or_freetext(
             structured_llm,
