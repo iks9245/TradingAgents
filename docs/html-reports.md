@@ -9,6 +9,42 @@ small theme-toggle script, no external requests of any kind. It opens from
 archived next to the run it describes. There is no server and nothing to install
 beyond the package itself.
 
+## Automatic generation
+
+Saving a run from the CLI writes `complete_report.html` beside `complete_report.md`,
+and prints a `file://` link you can paste straight into a browser:
+
+```
+✓ Report saved to: /home/you/reports/NVDA_20260805_120000
+  Complete report: complete_report.md
+  Browser version: complete_report.html
+  Open: file:///home/you/reports/NVDA_20260805_120000/complete_report.html
+```
+
+`TradingAgentsGraph.save_reports()` produces it too — both paths go through the
+same writer, so a headless run gets the same artifacts a CLI run does.
+
+Markdown remains the source of truth. The HTML is generated *from* it, and if
+generation fails the markdown tree is already on disk and is kept: the failure
+is logged, `ReportPaths.html` comes back `None`, and the CLI simply does not
+print a browser line. A rendering bug must never turn a completed analysis —
+which cost real money — into a lost report.
+
+To turn it off:
+
+```bash
+tradingagents analyze --no-html          # one run
+export TRADINGAGENTS_REPORT_HTML=false   # always
+```
+
+```python
+config["report_html"] = False            # programmatically
+write_report_bundle(state, "NVDA", path, html=False)   # per call
+```
+
+Use `write_report_bundle` when you want both paths back; `write_report_tree`
+still returns just the markdown path, unchanged, for existing callers.
+
 ## Reading an analysis run in the browser
 
 ```bash

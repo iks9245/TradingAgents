@@ -49,7 +49,7 @@ from tradingagents.graph.analyst_execution import (
     sync_analyst_tracker_from_chunk,
 )
 from tradingagents.graph.trading_graph import TradingAgentsGraph
-from tradingagents.reporting import write_report_tree
+from tradingagents.reporting import ReportPaths, write_report_bundle
 
 console = Console()
 
@@ -760,9 +760,13 @@ def get_analysis_date():
             )
 
 
-def save_report_to_disk(final_state, ticker: str, save_path: Path):
-    """Save the complete analysis report to disk (shared CLI/API writer)."""
-    return write_report_tree(final_state, ticker, save_path)
+def save_report_to_disk(final_state, ticker: str, save_path: Path) -> ReportPaths:
+    """Save the complete analysis report to disk (shared CLI/API writer).
+
+    Returns both paths: the markdown tree and, unless disabled via
+    ``report_html``, the browsable HTML page written beside it.
+    """
+    return write_report_bundle(final_state, ticker, save_path)
 
 
 def display_complete_report(final_state):
@@ -971,7 +975,9 @@ def format_tool_args(args, max_length=80) -> str:
         return result[:max_length - 3] + "..."
     return result
 
-def _build_run_config(selections: dict, checkpoint: bool | None) -> dict:
+def _build_run_config(
+    selections: dict, checkpoint: bool | None, html: bool | None = None
+) -> dict:
     """Assemble the run config from interactive selections, honoring env precedence.
 
     Round counts and checkpoint follow "explicit env/flag wins": an env-applied
@@ -998,14 +1004,18 @@ def _build_run_config(selections: dict, checkpoint: bool | None) -> dict:
     # the flag preserves TRADINGAGENTS_CHECKPOINT_ENABLED / the default (#976).
     if checkpoint is not None:
         config["checkpoint_enabled"] = checkpoint
+    # Same rule for --html/--no-html: omitting the flag preserves
+    # TRADINGAGENTS_REPORT_HTML / the default.
+    if html is not None:
+        config["report_html"] = html
     return config
 
 
-def run_analysis(checkpoint: bool | None = None):
+def run_analysis(checkpoint: bool | None = None, html: bool | None = None):
     # First get all user selections
     selections = get_user_selections()
 
-    config = _build_run_config(selections, checkpoint)
+    config = _build_run_config(selections, checkpoint, html)
 
     # Create stats callback handler for tracking LLM/tool calls
     stats_handler = StatsCallbackHandler()
@@ -1268,9 +1278,13 @@ def run_analysis(checkpoint: bool | None = None):
         ).strip()
         save_path = Path(save_path_str)
         try:
-            report_file = save_report_to_disk(final_state, selections["ticker"], save_path)
+            paths = save_report_to_disk(final_state, selections["ticker"], save_path)
             console.print(f"\n[green]✓ Report saved to:[/green] {save_path.resolve()}")
-            console.print(f"  [dim]Complete report:[/dim] {report_file.name}")
+            console.print(f"  [dim]Complete report:[/dim] {paths.markdown.name}")
+            if paths.html:
+                # Absolute path so it can be pasted straight into a browser.
+                console.print(f"  [dim]Browser version:[/dim] {paths.html.name}")
+                console.print(f"  [dim]Open:[/dim] file://{paths.html.resolve()}")
         except Exception as e:
             console.print(f"[red]Error saving report: {e}[/red]")
 
@@ -1293,13 +1307,19 @@ def analyze(
         "--clear-checkpoints",
         help="Delete all saved checkpoints before running (force fresh start).",
     ),
+    html: bool | None = typer.Option(
+        None,
+        "--html/--no-html",
+        help="Write a browsable complete_report.html beside the saved markdown "
+        "report. Omit to honor TRADINGAGENTS_REPORT_HTML (default: on).",
+    ),
 ):
     if clear_checkpoints:
         from tradingagents.graph.checkpointer import clear_all_checkpoints
         n = clear_all_checkpoints(DEFAULT_CONFIG["data_cache_dir"])
         console.print(f"[yellow]Cleared {n} checkpoint(s).[/yellow]")
     try:
-        run_analysis(checkpoint=checkpoint)
+        run_analysis(checkpoint=checkpoint, html=html)
     except _NO_CONSOLE_ERRORS:
         # A terminal with no console buffer cannot host the interactive prompts.
         # Emit one actionable line on stderr instead of a prompt_toolkit

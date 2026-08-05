@@ -324,8 +324,10 @@ See [`docs/backtesting.md`](docs/backtesting.md) for the methodology, how to rea
 
 Analysis runs and backtest results both render to **single self-contained HTML files** — inline CSS and SVG, no external requests — so they open from `file://`, email as attachments, print, and archive next to the run they describe.
 
+Saving a run from the CLI now writes `complete_report.html` beside the markdown and prints a `file://` link. Disable with `--no-html` or `TRADINGAGENTS_REPORT_HTML=false`. Markdown stays the source of truth — if HTML generation fails, the markdown tree is kept and the failure is only logged.
+
 ```bash
-# read a finished analysis run in the browser
+# render an older run, or one saved elsewhere
 python -m tradingagents.webreport ~/.tradingagents/logs/reports/NVDA_20260805_120000
 
 # charted backtest and ablation results (--html is additive; pass --out too for markdown)
