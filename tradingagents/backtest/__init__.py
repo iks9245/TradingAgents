@@ -24,6 +24,19 @@ Programmatic use::
     print(result.metrics["trading_agents"].mean_alpha)
 """
 
+from .ablation import (
+    SUITES,
+    AblationArm,
+    AblationResult,
+    analysts_drop_one,
+    analysts_solo,
+    debate_depth,
+    reference_arm,
+    resolve_suite,
+    risk_depth,
+    run_ablation,
+)
+from .ablation_report import render_ablation_report, render_ablation_summary
 from .grid import EvalPoint, EvaluationGrid, build_grid, latest_settled_date
 from .harness import Backtest, BacktestResult, DecisionCache
 from .metrics import Decision, PairedComparison, StrategyMetrics, compare, spearman, summarize
@@ -41,7 +54,10 @@ from .strategies import (
 from .universe import UNIVERSES, resolve_universe
 
 __all__ = [
+    "SUITES",
     "UNIVERSES",
+    "AblationArm",
+    "AblationResult",
     "AlwaysRating",
     "Backtest",
     "BacktestResult",
@@ -59,13 +75,22 @@ __all__ = [
     "StrategyMetrics",
     "TradingAgentsStrategy",
     "UniformRandomRating",
+    "analysts_drop_one",
+    "analysts_solo",
     "build_backtest_config",
     "build_grid",
     "compare",
+    "debate_depth",
     "latest_settled_date",
+    "reference_arm",
+    "render_ablation_report",
+    "render_ablation_summary",
     "render_report",
     "render_summary",
+    "resolve_suite",
     "resolve_universe",
+    "risk_depth",
+    "run_ablation",
     "spearman",
     "summarize",
 ]
