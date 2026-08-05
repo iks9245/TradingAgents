@@ -83,6 +83,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--cache", help="JSONL decision cache; enables resuming an interrupted run")
     parser.add_argument("--out", help="write the full markdown report here")
+    parser.add_argument(
+        "--html",
+        help="write a charted, self-contained HTML report here (opens from file://, "
+             "no network needed)",
+    )
     parser.add_argument("--seed", type=int, default=0, help="baseline/bootstrap seed (default 0)")
     parser.add_argument(
         "--bootstrap-iterations", type=int, default=10_000,
@@ -202,6 +207,15 @@ def main(argv: list[str] | None = None) -> int:
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(render_report(result), encoding="utf-8")
         print(f"\nFull report written to {out_path}")
+
+    if args.html:
+        # Imported here so the markdown-only path stays free of the renderer.
+        from tradingagents.webreport import render_backtest_html
+
+        html_path = Path(args.html).expanduser()
+        html_path.parent.mkdir(parents=True, exist_ok=True)
+        html_path.write_text(render_backtest_html(result), encoding="utf-8")
+        print(f"HTML report written to {html_path}")
 
     return 0
 

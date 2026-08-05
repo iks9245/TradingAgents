@@ -320,6 +320,23 @@ Each arm is scored on the identical grid and compared against the full pipeline.
 
 See [`docs/backtesting.md`](docs/backtesting.md) for the methodology, how to read the reports, and the suites available.
 
+## HTML reports
+
+Analysis runs and backtest results both render to **single self-contained HTML files** — inline CSS and SVG, no external requests — so they open from `file://`, email as attachments, print, and archive next to the run they describe.
+
+```bash
+# read a finished analysis run in the browser
+python -m tradingagents.webreport ~/.tradingagents/logs/reports/NVDA_20260805_120000
+
+# charted backtest and ablation results (--html is additive; pass --out too for markdown)
+python -m tradingagents.backtest --start 2025-06-01 --cache runs/bt.jsonl --html runs/report.html
+python -m tradingagents.backtest.ablation_cli --start 2025-06-01 --html runs/ablation.html
+```
+
+Backtest pages lead with the confidence-interval plot rather than the returns table, because the question the harness answers is whether a bar crosses the zero line. A running-mean-alpha chart shows whether an edge was steady or came from one window, and a diverging rating-mix bar makes an all-Buy pipeline obvious at a glance. Colours come from a validated palette, both themes are supported with a toggle, and every chart ships its data table.
+
+See [`docs/html-reports.md`](docs/html-reports.md) for details. Note these are static artifacts of runs that already happened — there is no web server, and the interactive interface remains the Rich terminal UI (`tradingagents`).
+
 ## Contributing
 
 Contributions are welcome: bug fixes, documentation, and feature ideas; past contributions are credited per release in [`CHANGELOG.md`](CHANGELOG.md).
