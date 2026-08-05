@@ -17,6 +17,10 @@ dependencies = [
     "langchain-openai>=0.3.23",
     "langgraph>=0.4.8",
     "langgraph-checkpoint-sqlite>=2.0.0",
+    # Used directly by tradingagents.webreport to render report markdown to
+    # HTML. Already arrives transitively via rich; declared because we import
+    # it ourselves and must not depend on another package's dependency.
+    "markdown-it-py>=3.0.0",
     "pandas>=2.3.0",
     "parsel>=1.10.0",
     "python-dotenv>=1.0.0",
