@@ -134,30 +134,92 @@ table rather than the absolute numbers.
 
 ## Ablations
 
-`--analysts` restricts the pipeline to a subset, which prices what the rest
-contribute:
+The graph has twelve decision nodes but only four fetch new information; the
+other eight re-process the same analyst reports. Whether those eight change the
+outcome is an empirical question, and the ablation runner answers it by running
+configurations that differ in exactly one respect over an identical grid.
 
 ```bash
-# All four analysts (default)
-python -m tradingagents.backtest --start 2025-06-01 --cache runs/full.jsonl --out runs/full.md
+# Always start here — an ablation is the most expensive thing in this package.
+python -m tradingagents.backtest.ablation_cli \
+    --start 2025-06-01 --universe smoke --dry-run
 
-# Market analyst only
-python -m tradingagents.backtest --start 2025-06-01 --analysts market \
-    --cache runs/market.jsonl --out runs/market.md
+# What does each analyst contribute?
+python -m tradingagents.backtest.ablation_cli \
+    --start 2025-06-01 --suite analysts_drop_one \
+    --cache runs/ablation.jsonl --out runs/ablation.md
+
+# A specific pair, cheapest possible comparison
+python -m tradingagents.backtest.ablation_cli --start 2025-06-01 --arms all,market
 ```
 
-Use separate cache files: the cache is keyed on strategy name and point, not on
-configuration, so pointing two different configurations at one cache will serve
-the first one's decisions to the second.
+### Suites
 
-Worth ablating, in rough order of how much they cost to run:
+| Suite | Arms | Question it answers |
+|---|---|---|
+| `analysts_drop_one` | Full, plus one arm per analyst removed | What does each analyst contribute? |
+| `analysts_solo` | Full, plus one arm per analyst alone | How much does one analyst reproduce on its own? |
+| `debate_depth` | Bull/Bear rounds at 1, 2, 3 | Is deeper debate worth the tokens? |
+| `risk_depth` | Risk-analyst rounds at 1, 2, 3 | Same, for the risk stage |
 
-- The four analysts individually (`--analysts`).
-- Debate depth — set `max_debate_rounds` / `max_risk_discuss_rounds` in the
-  config. Only four of the graph's twelve nodes fetch new data; the rest
-  re-process the same analyst reports, so it is worth measuring whether the
-  extra rounds move the result at all.
-- Deep vs quick model for the two manager nodes.
+Every arm is compared against the **reference arm** (the first one, which the
+presets make the full pipeline) using the same paired, date-clustered bootstrap
+the baseline comparison uses.
+
+One cache file is safe across all arms: arm names are derived from their
+configuration (`ta[analysts=market+news]`), so two differently-configured arms
+can never collide, and two spellings of the same configuration share cached
+decisions instead of paying twice.
+
+### What can and cannot be ablated from config
+
+**Analysts genuinely come out of the graph.** `selected_analysts` removes their
+nodes and their tools, so the analyst suites measure real structural changes.
+
+**Debate and risk arms only change depth.** The graph hard-codes at least one
+Bull/Bear exchange and one pass through the three risk analysts, so
+`debate_depth` measures the marginal value of *more* debate, not the value of
+debate versus none. Removing those stages entirely needs a graph change, not a
+config flag. The report says so inline, because it is the easiest wrong
+conclusion to draw from the table.
+
+### Reading a null result
+
+An arm that removes work and shows no measurable difference means that work was
+not paying for itself **on this grid** — that is the actionable direction, and
+the asymmetry matters: for a component that costs tokens, "no detectable effect"
+argues for dropping it, not keeping it.
+
+But absence of a difference is not proof of equivalence, and at small sample
+sizes the two are indistinguishable in the table. The report states the
+**resolvable effect** — the confidence interval's half-width — directly under
+the comparison:
+
+```
+**Resolvable effect**: roughly 0.443% per decision (34 decision dates). A true
+difference smaller than that will read as "no measurable difference" here
+regardless of whether it is real.
+```
+
+Check that number against the effect size you would care about before concluding
+anything. In practice, a 12-ticker grid over ~34 decision dates resolves only
+fairly large per-decision effects; distinguishing subtler contributions needs a
+longer date range, a wider universe, or both — which costs proportionally more
+LLM runs.
+
+### Other things worth ablating
+
+Beyond the presets, `AblationArm` takes arbitrary config overrides:
+
+```python
+from tradingagents.backtest import AblationArm, reference_arm, run_ablation
+
+arms = [
+    reference_arm(),
+    AblationArm("cheap managers", config_overrides={"deep_think_llm": "gpt-5-mini"}),
+    AblationArm("zero temperature", config_overrides={"temperature": 0.0}),
+]
+```
 
 ## Cost
 

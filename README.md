@@ -305,7 +305,20 @@ One evaluation point is one full multi-agent run, so always `--dry-run` first an
 
 Two things the harness is deliberate about. Confidence intervals are bootstrapped **clustering on the decision date**, because same-day decisions across tickers share a market factor and are not independent observations. And `--knowledge-cutoff` flags evaluation dates that precede your model's training cutoff, reporting them separately: on those dates the model may recall the outcome rather than forecast it, which no amount of data-layer look-ahead filtering can prevent.
 
-See [`docs/backtesting.md`](docs/backtesting.md) for the methodology, how to read the report, and how to run ablations.
+### Ablations
+
+Only four of the graph's twelve decision nodes fetch new information; the other eight re-process the same analyst reports. Whether they change the outcome is measurable:
+
+```bash
+# What does each analyst contribute? (--dry-run first: this is the priciest run here)
+python -m tradingagents.backtest.ablation_cli \
+    --start 2025-06-01 --suite analysts_drop_one \
+    --cache runs/ablation.jsonl --out runs/ablation.md
+```
+
+Each arm is scored on the identical grid and compared against the full pipeline. One cache file serves every arm safely, since arm names are derived from their configuration. The report states the **resolvable effect size** alongside each comparison, so an underpowered null isn't mistaken for evidence that a component does nothing.
+
+See [`docs/backtesting.md`](docs/backtesting.md) for the methodology, how to read the reports, and the suites available.
 
 ## Contributing
 

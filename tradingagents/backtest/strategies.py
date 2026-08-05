@@ -141,22 +141,33 @@ class TradingAgentsStrategy:
     means a few hundred thousand tokens each; the harness caches every decision
     to disk so an interrupted run resumes instead of re-spending.
 
-    ``reuse_graph`` keeps a single :class:`TradingAgentsGraph` across points,
-    which is much cheaper than reconstructing LLM clients per call. Note the
-    consequence: the graph's memory log accumulates within the run, so later
-    decisions can see reflections on earlier ones. That is realistic for live
-    use but is a mild forward-information leak across the grid — pass
-    ``memory_log_path=None`` in the config (the default for backtests, set by
-    :func:`build_backtest_config`) to disable it.
+    A single :class:`TradingAgentsGraph` is constructed lazily and reused across
+    points, which is much cheaper than rebuilding LLM clients per call. The graph
+    would otherwise accumulate memory-log state within a run, letting later
+    decisions see reflections on earlier ones — realistic live, but a forward
+    leak across the grid. :func:`build_backtest_config` disables the memory log
+    for exactly that reason.
+
+    ``name`` must be distinct per configuration. The decision cache is keyed on
+    (strategy name, point), so two differently-configured strategies sharing a
+    name would silently serve each other's decisions. :class:`AblationArm
+    <tradingagents.backtest.ablation.AblationArm>` derives names from the
+    configuration to make that mistake impossible.
     """
 
-    name = "trading_agents"
-
-    def __init__(self, config: dict | None = None, *, selected_analysts=None, debug: bool = False):
+    def __init__(
+        self,
+        config: dict | None = None,
+        *,
+        selected_analysts=None,
+        debug: bool = False,
+        name: str = "trading_agents",
+    ):
         self._config = config
         self._selected_analysts = selected_analysts
         self._debug = debug
         self._graph = None
+        self.name = name
 
     def _get_graph(self):
         if self._graph is None:

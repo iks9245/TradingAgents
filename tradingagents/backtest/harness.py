@@ -132,6 +132,20 @@ class Backtest:
         self._outcomes: dict[str, object] = {}
         self._skipped: list[tuple[str, str]] = []
 
+    @property
+    def bootstrap_iterations(self) -> int:
+        """Resample count, so callers running their own comparisons can match it."""
+        return self._bootstrap_iterations
+
+    @property
+    def seed(self) -> int:
+        return self._seed
+
+    @property
+    def skipped(self) -> list[tuple[str, str]]:
+        """(key, reason) for every point dropped, either for prices or a failed run."""
+        return list(self._skipped)
+
     def prepare(self) -> None:
         """Load prices and resolve the realized outcome for every grid point.
 
