@@ -169,13 +169,46 @@ class TestComputedRiskCheck:
         md = render_trader_proposal(proposal, levels=_levels())
         assert "away from the last verified close" in md
 
-    def test_no_risk_check_without_levels(self):
+    def test_missing_levels_are_reported_not_hidden(self):
         proposal = TraderProposal(
             action=TraderAction.BUY,
             position_intent=PositionIntent.OPEN_LONG,
             reasoning="x", entry_price=500.0, stop_loss=460.0,
         )
-        assert "Risk Check" not in render_trader_proposal(proposal, levels=None)
+        md = render_trader_proposal(proposal, levels=None)
+        assert "Verified price levels were unavailable" in md
+        assert "unchecked" in md
+
+    def test_a_priced_trade_without_a_stop_is_called_out(self):
+        # The 2026-08-06 INTC trader gave an entry and no stop, and the whole
+        # check silently vanished — reading exactly like a stop that passed.
+        proposal = TraderProposal(
+            action=TraderAction.SELL,
+            position_intent=PositionIntent.REDUCE_LONG,
+            reasoning="Trim.", entry_price=101.06, position_sizing="1.5-2.0%",
+        )
+        md = render_trader_proposal(proposal, levels=_levels(atr=8.32, close=101.06))
+        assert "No stop loss was set" in md
+        assert "no verified downside limit" in md
+        # ...and it says where a 1x ATR stop would have sat: 101.06 - 8.32.
+        assert "92.74" in md
+
+    def test_stop_suggestion_follows_the_position_intent(self):
+        proposal = TraderProposal(
+            action=TraderAction.SELL,
+            position_intent=PositionIntent.OPEN_SHORT,
+            reasoning="x", entry_price=101.06,
+        )
+        md = render_trader_proposal(proposal, levels=_levels(atr=8.32, close=101.06))
+        assert "109.38" in md  # above entry for a short, not below
+
+    def test_a_proposal_with_no_levels_at_all_stays_quiet(self):
+        # A Hold that prices nothing has nothing to check.
+        proposal = TraderProposal(
+            action=TraderAction.HOLD,
+            position_intent=PositionIntent.NO_CHANGE, reasoning="x",
+        )
+        assert "Risk Check" not in render_trader_proposal(proposal, levels=_levels())
 
     def test_atr_multiple_is_none_when_atr_is_missing(self):
         ref = TradeReference("AMD", "2026-08-04", "FINAL", 518.58, None, None, None, None)

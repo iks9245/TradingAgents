@@ -194,11 +194,13 @@ class TraderProposal(BaseModel):
     stop_loss: float | None = Field(
         default=None,
         description=(
-            "Optional stop-loss price in the instrument's quote currency. It must "
-            "sit BELOW entry_price when the intent is long-side (open or reduce a "
-            "long) and ABOVE entry_price when the intent is short-side. Size the "
-            "distance against the ATR given in the prompt — a stop closer than "
-            "1x ATR is inside normal daily noise and will usually be triggered."
+            "Stop-loss price in the instrument's quote currency. Set one whenever "
+            "you set an entry_price: a priced trade with no stop states no "
+            "downside limit, and the report will say so. It must sit BELOW "
+            "entry_price when the intent is long-side (open or reduce a long) and "
+            "ABOVE entry_price when the intent is short-side. Size the distance "
+            "against the ATR given in the prompt — a stop closer than 1x ATR is "
+            "inside normal daily noise and will usually be triggered."
         ),
     )
     position_sizing: str | None = Field(
@@ -264,15 +266,46 @@ def render_risk_check(proposal: TraderProposal, levels) -> list[str]:
     stop that daily noise would take out. ``levels`` is a
     ``dataflows.market_data_validator.TradeReference`` or None.
     """
-    if levels is None or proposal.entry_price is None or proposal.stop_loss is None:
+    # A proposal that names neither level is not making a priced trade, so
+    # there is nothing to check.
+    if proposal.entry_price is None and proposal.stop_loss is None:
         return []
+
+    header = ["", "**Risk Check** (computed from verified market data, not model-stated):"]
+
+    # Silence was the loophole. On the 2026-08-06 INTC run the trader gave an
+    # entry of 101.06 and no stop, and the whole check simply did not render —
+    # so a proposal with no downside limit read exactly like one whose stop had
+    # passed inspection. Say plainly what could not be checked and why.
+    if proposal.stop_loss is None or proposal.entry_price is None:
+        missing = "stop loss" if proposal.stop_loss is None else "entry price"
+        note = [
+            f"- ⚠️ No {missing} was set, so the stop distance could not be checked. "
+            f"This proposal states no verified downside limit."
+        ]
+        if proposal.stop_loss is None and levels is not None and levels.atr and proposal.entry_price:
+            below = _STOP_BELOW_ENTRY.get(proposal.position_intent, True)
+            suggested = (
+                proposal.entry_price - MIN_STOP_ATR_MULTIPLE * levels.atr
+                if below
+                else proposal.entry_price + MIN_STOP_ATR_MULTIPLE * levels.atr
+            )
+            note.append(
+                f"- For reference, {MIN_STOP_ATR_MULTIPLE:.1f}x ATR ({levels.atr:,.2f}) from "
+                f"the stated entry of {proposal.entry_price:,.2f} would sit at {suggested:,.2f}."
+            )
+        return header + note
+
+    if levels is None:
+        return header + [
+            "- ⚠️ Verified price levels were unavailable, so the stop distance could not be "
+            "measured against volatility. Treat any ATR multiple stated above as unchecked."
+        ]
 
     distance = abs(proposal.entry_price - proposal.stop_loss)
     multiple = levels.atr_multiple(proposal.entry_price, proposal.stop_loss)
 
-    lines = [
-        "",
-        "**Risk Check** (computed from verified market data, not model-stated):",
+    lines = header + [
         f"- Reference close ({levels.as_of}, bar status {levels.bar_status}): "
         + (f"{levels.close:,.2f}" if levels.close is not None else "N/A"),
         "- ATR: " + (f"{levels.atr:,.2f}" if levels.atr else "N/A"),
