@@ -79,3 +79,89 @@ class TestVerifiedFundamentalsSnapshot:
 
         snapshot = get_verified_fundamentals_snapshot.invoke({"ticker": "AMD", "curr_date": "2025-12-31"})
         assert "Verified fundamentals snapshot for AMD" in snapshot
+
+
+@pytest.mark.unit
+class TestSnapshotIsInjectedNotOffered:
+    """The snapshot must reach the analyst without the model choosing to fetch it.
+
+    On the 2026-08-06 INTC run it was bound as a tool, the model never called
+    it, and every ratio in the report came from the raw vendor dump instead.
+    """
+
+    def _node_prompt(self, monkeypatch):
+        from unittest.mock import MagicMock
+
+        from langchain_core.messages import AIMessage
+        from langchain_core.runnables import RunnableLambda
+
+        import tradingagents.agents.analysts.fundamentals_analyst as fa
+
+        captured = {}
+        llm = MagicMock()
+        llm.bind_tools.side_effect = lambda tools: (
+            captured.__setitem__("tools", [t.name for t in tools])
+            or RunnableLambda(lambda p: captured.__setitem__("prompt", p) or AIMessage(content="ok"))
+        )
+        fa.create_fundamentals_analyst(llm)({
+            "trade_date": "2025-12-31", "company_of_interest": "AMD", "messages": [],
+        })
+        return captured
+
+    def test_snapshot_text_is_in_the_system_message(self, monkeypatch):
+        fake = _ticker()
+        monkeypatch.setattr(validator.yf, "Ticker", lambda symbol: fake)
+        monkeypatch.setattr(validator, "load_ohlcv", lambda symbol, date: pd.DataFrame())
+        validator.render_fundamentals_snapshot_block.cache_clear()
+
+        captured = self._node_prompt(monkeypatch)
+        system_message = captured["prompt"].messages[0].content
+        assert "<start_of_verified_fundamentals>" in system_message
+        assert "Verified fundamentals snapshot for AMD" in system_message
+        assert "no tool to call" in system_message
+
+    def test_snapshot_is_no_longer_a_tool_the_model_can_skip(self, monkeypatch):
+        fake = _ticker()
+        monkeypatch.setattr(validator.yf, "Ticker", lambda symbol: fake)
+        monkeypatch.setattr(validator, "load_ohlcv", lambda symbol, date: pd.DataFrame())
+        validator.render_fundamentals_snapshot_block.cache_clear()
+
+        assert "get_verified_fundamentals_snapshot" not in self._node_prompt(monkeypatch)["tools"]
+
+    def test_failure_degrades_to_an_explicit_notice(self, monkeypatch):
+        def boom(*args, **kwargs):
+            raise RuntimeError("vendor down")
+
+        monkeypatch.setattr(validator, "build_verified_fundamentals_snapshot", boom)
+        validator.render_fundamentals_snapshot_block.cache_clear()
+
+        block = validator.render_fundamentals_snapshot_block("AMD", "2025-12-31")
+        assert "UNAVAILABLE" in block
+        # The analyst must be told not to invent the figures it cannot verify.
+        assert "do not state a margin" in block.lower()
+
+    def test_missing_arguments_do_not_reach_the_vendor(self, monkeypatch):
+        called = []
+        monkeypatch.setattr(
+            validator, "build_verified_fundamentals_snapshot",
+            lambda *a, **k: called.append(a) or "x",
+        )
+        validator.render_fundamentals_snapshot_block.cache_clear()
+
+        assert "UNAVAILABLE" in validator.render_fundamentals_snapshot_block("", "2025-12-31")
+        assert "UNAVAILABLE" in validator.render_fundamentals_snapshot_block("AMD", "")
+        assert called == []
+
+    def test_repeated_calls_hit_the_cache(self, monkeypatch):
+        # The node re-runs on every turn of its tool loop; without caching that
+        # is a fresh round of vendor calls each time.
+        calls = []
+        monkeypatch.setattr(
+            validator, "build_verified_fundamentals_snapshot",
+            lambda s, d: calls.append((s, d)) or "snapshot",
+        )
+        validator.render_fundamentals_snapshot_block.cache_clear()
+
+        for _ in range(3):
+            validator.render_fundamentals_snapshot_block("AMD", "2025-12-31")
+        assert len(calls) == 1

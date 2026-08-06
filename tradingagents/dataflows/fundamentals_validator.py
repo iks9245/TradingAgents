@@ -9,6 +9,7 @@ truth for every derived fundamental claim.
 
 from __future__ import annotations
 
+import functools
 from collections.abc import Iterable
 
 import pandas as pd
@@ -401,6 +402,36 @@ def _append_valuation_section(lines: list[str], price: float | None, annual_eps:
             "because it reweights the diluted share count instead of adding rounded "
             "quarters. Both are legitimate; cite one, name which, and do not blend them.",
         ]
+
+
+@functools.lru_cache(maxsize=64)
+def render_fundamentals_snapshot_block(symbol: str, curr_date: str) -> str:
+    """Build the snapshot for prompt injection, or an explicit unavailable notice.
+
+    Offered as a tool, this snapshot was simply not called: on the 2026-08-06
+    INTC run the analyst ignored the instruction and sourced every ratio from
+    the raw vendor dump instead, so the recomputed margins, the P/E conversion
+    table, and the printed arithmetic never reached the report. A prompt cannot
+    make a model call a tool; pre-fetching removes the choice.
+
+    Cached because the analyst node re-runs on every turn of its tool loop and
+    the underlying filings do not change within a run.
+    """
+    if not symbol or not curr_date:
+        return _UNAVAILABLE_NOTICE
+    try:
+        return build_verified_fundamentals_snapshot(symbol, curr_date)
+    except Exception:  # noqa: BLE001 — a missing snapshot must not block the run
+        return _UNAVAILABLE_NOTICE
+
+
+_UNAVAILABLE_NOTICE = (
+    "**Verified fundamentals snapshot: UNAVAILABLE.** No statement data could be "
+    "resolved for this instrument. Do not state a margin, growth rate, leverage "
+    "ratio, or valuation multiple that you derived yourself — say the figures "
+    "could not be verified and report only what the raw statements show, with "
+    "their periods named."
+)
 
 
 def build_verified_fundamentals_snapshot(
