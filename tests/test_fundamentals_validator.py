@@ -79,3 +79,155 @@ class TestVerifiedFundamentalsSnapshot:
 
         snapshot = get_verified_fundamentals_snapshot.invoke({"ticker": "AMD", "curr_date": "2025-12-31"})
         assert "Verified fundamentals snapshot for AMD" in snapshot
+
+
+@pytest.mark.unit
+class TestSnapshotIsInjectedNotOffered:
+    """The snapshot must reach the analyst without the model choosing to fetch it.
+
+    On the 2026-08-06 INTC run it was bound as a tool, the model never called
+    it, and every ratio in the report came from the raw vendor dump instead.
+    """
+
+    def _node_prompt(self, monkeypatch):
+        from unittest.mock import MagicMock
+
+        from langchain_core.messages import AIMessage
+        from langchain_core.runnables import RunnableLambda
+
+        import tradingagents.agents.analysts.fundamentals_analyst as fa
+
+        captured = {}
+        llm = MagicMock()
+        llm.bind_tools.side_effect = lambda tools: (
+            captured.__setitem__("tools", [t.name for t in tools])
+            or RunnableLambda(lambda p: captured.__setitem__("prompt", p) or AIMessage(content="ok"))
+        )
+        fa.create_fundamentals_analyst(llm)({
+            "trade_date": "2025-12-31", "company_of_interest": "AMD", "messages": [],
+        })
+        return captured
+
+    def test_snapshot_text_is_in_the_system_message(self, monkeypatch):
+        fake = _ticker()
+        monkeypatch.setattr(validator.yf, "Ticker", lambda symbol: fake)
+        monkeypatch.setattr(validator, "load_ohlcv", lambda symbol, date: pd.DataFrame())
+        validator.render_fundamentals_snapshot_block.cache_clear()
+
+        captured = self._node_prompt(monkeypatch)
+        system_message = captured["prompt"].messages[0].content
+        assert "<start_of_verified_fundamentals>" in system_message
+        assert "Verified fundamentals snapshot for AMD" in system_message
+        assert "no tool to call" in system_message
+
+    def test_snapshot_is_no_longer_a_tool_the_model_can_skip(self, monkeypatch):
+        fake = _ticker()
+        monkeypatch.setattr(validator.yf, "Ticker", lambda symbol: fake)
+        monkeypatch.setattr(validator, "load_ohlcv", lambda symbol, date: pd.DataFrame())
+        validator.render_fundamentals_snapshot_block.cache_clear()
+
+        assert "get_verified_fundamentals_snapshot" not in self._node_prompt(monkeypatch)["tools"]
+
+    def test_failure_degrades_to_an_explicit_notice(self, monkeypatch):
+        def boom(*args, **kwargs):
+            raise RuntimeError("vendor down")
+
+        monkeypatch.setattr(validator, "build_verified_fundamentals_snapshot", boom)
+        validator.render_fundamentals_snapshot_block.cache_clear()
+
+        block = validator.render_fundamentals_snapshot_block("AMD", "2025-12-31")
+        assert "UNAVAILABLE" in block
+        # The analyst must be told not to invent the figures it cannot verify.
+        assert "do not state a margin" in block.lower()
+
+    def test_missing_arguments_do_not_reach_the_vendor(self, monkeypatch):
+        called = []
+        monkeypatch.setattr(
+            validator, "build_verified_fundamentals_snapshot",
+            lambda *a, **k: called.append(a) or "x",
+        )
+        validator.render_fundamentals_snapshot_block.cache_clear()
+
+        assert "UNAVAILABLE" in validator.render_fundamentals_snapshot_block("", "2025-12-31")
+        assert "UNAVAILABLE" in validator.render_fundamentals_snapshot_block("AMD", "")
+        assert called == []
+
+    def test_repeated_calls_hit_the_cache(self, monkeypatch):
+        # The node re-runs on every turn of its tool loop; without caching that
+        # is a fresh round of vendor calls each time.
+        calls = []
+        monkeypatch.setattr(
+            validator, "build_verified_fundamentals_snapshot",
+            lambda s, d: calls.append((s, d)) or "snapshot",
+        )
+        validator.render_fundamentals_snapshot_block.cache_clear()
+
+        for _ in range(3):
+            validator.render_fundamentals_snapshot_block("AMD", "2025-12-31")
+        assert len(calls) == 1
+
+
+@pytest.mark.unit
+class TestOperatingIncomeCrossCheck:
+    """The vendor's operating income must reconcile with its own expense lines.
+
+    yfinance reports INTC 2026 Q2 operating income as 1,966M while itemising
+    expenses that give 1,805M — the 161M restructuring charge is listed but not
+    deducted. That inflated figure reached a shipped report as "operating income
+    swung to $1.97B" and became the bull case's central evidence.
+    """
+
+    def _frame_with(self, **rows) -> pd.DataFrame:
+        return _frame({k.replace("_", " "): [v] for k, v in rows.items()}, ["2026-06-30"])
+
+    def _snapshot(self, monkeypatch, quarterly: pd.DataFrame) -> str:
+        fake = _ticker()
+        fake.quarterly_income_stmt = quarterly
+        fake.income_stmt = pd.DataFrame()
+        monkeypatch.setattr(validator.yf, "Ticker", lambda symbol: fake)
+        monkeypatch.setattr(validator, "load_ohlcv", lambda s, d: pd.DataFrame())
+        return validator.build_verified_fundamentals_snapshot("INTC", "2026-06-30")
+
+    def test_excluded_restructuring_is_flagged_with_both_values(self, monkeypatch):
+        quarterly = _frame({
+            "Total Revenue": [16_128_000_000.0], "Gross Profit": [6_509_000_000.0],
+            "Research And Development": [3_368_000_000.0],
+            "Selling General And Administration": [1_175_000_000.0],
+            "Restructuring And Mergern Acquisition": [161_000_000.0],
+            "Operating Income": [1_966_000_000.0],
+        }, ["2026-06-30"])
+        snapshot = self._snapshot(monkeypatch, quarterly)
+        assert "⚠️ MISMATCH" in snapshot
+        assert "1,966" in snapshot and "1,805" in snapshot
+        assert "restructuring/M&A line (161)" in snapshot
+        assert "do not build a turnaround narrative on it" in snapshot
+
+    def test_a_consistent_statement_is_not_flagged(self, monkeypatch):
+        quarterly = _frame({
+            "Total Revenue": [16_128_000_000.0], "Gross Profit": [6_509_000_000.0],
+            "Research And Development": [3_368_000_000.0],
+            "Selling General And Administration": [1_175_000_000.0],
+            "Restructuring And Mergern Acquisition": [161_000_000.0],
+            "Operating Income": [1_805_000_000.0],
+        }, ["2026-06-30"])
+        snapshot = self._snapshot(monkeypatch, quarterly)
+        assert "⚠️ MISMATCH" not in snapshot
+        assert "agree for every period shown" in snapshot
+
+    def test_unknown_expense_rows_do_not_blame_the_vendor(self, monkeypatch):
+        # When our recomputation comes out LOWER than reported the vendor is
+        # inflating; when it comes out HIGHER we simply do not know every
+        # expense row it uses (AMD's intangibles amortization). Only the first
+        # is the vendor's fault, so only the first is reported.
+        quarterly = _frame({
+            "Total Revenue": [16_128_000_000.0], "Gross Profit": [6_509_000_000.0],
+            "Research And Development": [3_368_000_000.0],
+            "Selling General And Administration": [1_175_000_000.0],
+            "Operating Income": [1_000_000_000.0],
+        }, ["2026-06-30"])
+        snapshot = self._snapshot(monkeypatch, quarterly)
+        assert "⚠️ MISMATCH" not in snapshot
+
+    def test_section_is_skipped_when_the_rows_are_absent(self, monkeypatch):
+        snapshot = self._snapshot(monkeypatch, _frame({"Diluted EPS": [0.8]}, ["2026-06-30"]))
+        assert "Operating income cross-check" not in snapshot

@@ -107,6 +107,58 @@ class TestValueExtractionPrecision:
 
 
 @pytest.mark.unit
+class TestValueExtractionPrecisionII:
+    """Second round of extraction guards, from the 2026-08-06 INTC report.
+
+    Every warning that report produced was a false positive, and all three had
+    distinct causes.
+    """
+
+    def test_a_number_followed_by_a_comma_is_not_truncated(self):
+        from tradingagents.report_lint import _NUMBER_RE
+
+        # "$111.52," used to match "111", which then "conflicted" with 111.52.
+        assert _NUMBER_RE.search("at $111.52, confirming").group(1) == "111.52"
+        assert _NUMBER_RE.search("ATR of 8.32, and").group(1) == "8.32"
+        # ...while genuine thousands separators still parse whole.
+        assert _NUMBER_RE.search("1,234.56 total").group(1) == "1,234.56"
+        assert _NUMBER_RE.search("1,234 units").group(1) == "1,234"
+
+    def test_comma_truncation_no_longer_invents_a_conflict(self):
+        assert lint_report("Price sits below its 50-day SMA at $111.52, confirming weakness.") == []
+
+    def test_number_in_a_separate_clause_is_not_a_reading(self):
+        # "$100B capital programme" is capex prose, not a leverage reading.
+        assert lint_report(
+            "| Debt to Equity | 49.00% |\n"
+            "Intel has a high debt-to-equity ratio, undertaking a **$100B+ capital programme**."
+        ) == []
+
+    def test_price_metric_quoted_as_a_percentage_is_not_a_reading(self):
+        # "ATR of 8.2%" is ATR as a share of price, not ATR in dollars.
+        assert lint_report("ATR is 8.32 today.\nWith an ATR of 8.2%, use protective puts.") == []
+
+    def test_parenthesised_qualifier_still_binds_the_value(self):
+        # "(MRQ):" must not break the label-to-value binding.
+        findings = lint_report(
+            "- **Debt to Equity (MRQ):** 49.00%\n- Debt to Equity (MRQ): 61.00%"
+        )
+        assert any(f.kind == "conflict" for f in findings)
+
+    def test_relinting_a_saved_report_does_not_read_its_own_warnings(self):
+        # The block's evidence line lists every value it found; re-linting fed
+        # those back in as fresh readings and manufactured a conflict.
+        body = "ATR is 8.32 today."
+        saved = (
+            "# Trading Analysis Report: INTC\n\n"
+            "> ## ⚠️ Numeric consistency warnings\n>\n"
+            "> **[conflict] atr is stated as both 8 and 8.32**\n"
+            "> Distinct values found for atr: 8, 8.2, 8.32.\n\n" + body
+        )
+        assert lint_report(saved) == []
+
+
+@pytest.mark.unit
 def test_empty_and_non_numeric_reports_are_clean():
     assert lint_report("") == []
     assert lint_report("A prose report with no figures.") == []

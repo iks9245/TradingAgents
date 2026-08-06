@@ -18,7 +18,14 @@ class Finding:
 # Keep this deliberately narrow: report snapshots use ordinary decimal numbers,
 # and accepting partial or malformed values would make a warning untrustworthy.
 _NUMBER = r"[+-]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?"
-_NUMBER_RE = re.compile(rf"(?<![\d,])({_NUMBER})(?![\d,])")
+
+# The trailing guard rejects a digit (so a number is never cut short) and a
+# comma that starts a thousands group (so "1,234" is never read as "1"). It must
+# NOT reject an ordinary sentence comma: with a blanket `(?![\d,])` the text
+# "at $111.52, confirming" failed on the full match, backtracked, and matched
+# "111" — which then "conflicted" with the 111.52 stated elsewhere. Every bogus
+# warning on the 2026-08-06 INTC report came from that self-inflicted mismatch.
+_NUMBER_RE = re.compile(rf"(?<![\d,])({_NUMBER})(?!\d|,\d{{3}})")
 
 
 def _parse_number(value: str) -> float | None:
@@ -188,10 +195,12 @@ _METRIC_TOLERANCE: dict[str, float] = {
     "week52_low": 0.0015,
 }
 
-# Markers that mean "this number is a multiplier, not the metric's value".
-# Without this, "ATR 的 1.5 倍" contributes 1.5 as an ATR reading and conflicts
-# with the real 40.39 — a false positive on correct prose.
+# Markers that mean "this number is not the metric's value in its own units".
+# A price level is quoted in currency, never as a multiple or a percentage:
+# "ATR 的 1.5 倍" is a multiplier and "ATR of 8.2%" is ATR expressed as a share
+# of price. Counting either as a reading conflicts it with the real 8.32.
 _MULTIPLE_MARKERS = frozenset({"x", "X", "倍"})
+_NON_PRICE_MARKERS = _MULTIPLE_MARKERS | {"%"}
 
 
 @dataclass(frozen=True)
@@ -200,6 +209,28 @@ class _MetricValue:
     display: str
     marker: str | None
     approximate: bool
+
+
+# What may legitimately sit between a metric's label and its value: table
+# pipes, colons, brackets, currency marks, an emphasis marker, a short
+# parenthesised qualifier such as "(MRQ)", and a linking word. Anything else
+# means the number belongs to a different clause — "debt-to-equity ratio,
+# undertaking a $100B capital programme" is prose about capex, not a reading of
+# leverage, and reading it as one is how the linter invented a 49-vs-100
+# conflict on a report that had none.
+_BIND_PUNCT = r"[\s|:：=＝\-–—*_`\"'“”$¥€£~≈()（）\[\]【】]"
+_BIND_QUALIFIER = r"(?:\([A-Za-z0-9 .%/]{1,10}\)|（[^）]{1,10}）)"
+_BIND_WORD = r"(?:of|is|at|was|are|were|to|stands?|currently|now|reads?|為|为|是|達|达|約|约)"
+_BINDER_RE = re.compile(
+    rf"^(?:{_BIND_PUNCT}|{_BIND_QUALIFIER}|{_BIND_WORD})*$", re.IGNORECASE
+)
+# A value never sits this far from its label; beyond it we are reading prose.
+_MAX_BIND_CHARS = 24
+
+
+def _is_bound_to_label(gap: str) -> bool:
+    """True when only binder text separates a metric's label from a number."""
+    return len(gap) <= _MAX_BIND_CHARS and _BINDER_RE.match(gap) is not None
 
 
 def _is_part_of_a_metric_name(text: str) -> bool:
@@ -250,6 +281,11 @@ def _metric_values(markdown: str) -> dict[str, list[_MetricValue]]:
                 parsed = _parse_number(number_match.group(1))
                 if parsed is None:
                     continue
+                if not _is_bound_to_label(nearby[: number_match.start()]):
+                    # The label is mentioned, but this number belongs to another
+                    # clause. Reading it as the metric's value is what produced
+                    # phantom conflicts on prose-heavy reports.
+                    continue
                 if _is_part_of_a_metric_name(nearby[number_match.start() :]):
                     # "，但远高于200日均价" after a 50-day alias: the 200 is the next
                     # metric's name, not this metric's value. Reading it as one
@@ -282,11 +318,11 @@ def _distinct_values(values: list[_MetricValue]) -> list[_MetricValue]:
 def _metric_findings(markdown: str) -> list[Finding]:
     findings: list[Finding] = []
     for metric, occurrences in _metric_values(markdown).items():
-        # A price level is never written as a multiple, so a number carrying a
-        # multiple marker next to one of these aliases is a multiplier in prose
-        # ("1.5x ATR"), not a reading of the metric.
+        # A price level is quoted in currency, so a number next to one of these
+        # aliases carrying a multiple or percent marker is describing something
+        # else ("1.5x ATR", "ATR of 8.2%") rather than reading the metric.
         if metric not in _RATIO_METRICS:
-            occurrences = [v for v in occurrences if v.marker not in _MULTIPLE_MARKERS]
+            occurrences = [v for v in occurrences if v.marker not in _NON_PRICE_MARKERS]
 
         # An explicit hedge ("約 514", "approximately 514") is the writer saying
         # the figure is deliberately rounded. Such a value neither proves a
@@ -341,11 +377,38 @@ def _metric_findings(markdown: str) -> list[Finding]:
     return findings
 
 
+_WARNING_HEADING = "## ⚠️ Numeric consistency warnings"
+
+
+def _strip_existing_warnings(markdown: str) -> str:
+    """Remove a warning block this module previously inserted.
+
+    In the normal write path the lint runs on the assembled body, before any
+    block exists. But re-linting a saved report feeds the block's own evidence
+    line — "Distinct values found for atr: 8, 8.2, 8.32." — back in as three
+    more readings of ATR, so the linter reports a conflict it created itself.
+    """
+    if _WARNING_HEADING not in markdown:
+        return markdown
+    kept, skipping = [], False
+    for line in markdown.split("\n"):
+        if _WARNING_HEADING in line and line.lstrip().startswith(">"):
+            skipping = True
+            continue
+        if skipping:
+            if line.lstrip().startswith(">") or not line.strip():
+                continue
+            skipping = False
+        kept.append(line)
+    return "\n".join(kept)
+
+
 def lint_report(markdown: str) -> list[Finding]:
     """Return numeric findings without ever allowing linting to fail a report save."""
     try:
         if not isinstance(markdown, str):
             return []
+        markdown = _strip_existing_warnings(markdown)
         return _division_findings(markdown) + _metric_findings(markdown)
     except Exception:
         return []

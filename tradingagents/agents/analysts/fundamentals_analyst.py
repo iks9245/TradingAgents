@@ -7,7 +7,9 @@ from tradingagents.agents.utils.agent_utils import (
     get_income_statement,
     get_instrument_context_from_state,
     get_language_instruction,
-    get_verified_fundamentals_snapshot,
+)
+from tradingagents.dataflows.fundamentals_validator import (
+    render_fundamentals_snapshot_block,
 )
 
 
@@ -21,8 +23,17 @@ def create_fundamentals_analyst(llm):
             get_balance_sheet,
             get_cashflow,
             get_income_statement,
-            get_verified_fundamentals_snapshot,
         ]
+
+        # The snapshot used to be a tool the prompt asked for. On the
+        # 2026-08-06 INTC run the model simply did not call it and sourced every
+        # ratio from the raw vendor dump instead, so none of the recomputed
+        # figures reached the report. Pre-fetching it into the prompt — the same
+        # shape the sentiment analyst uses for its pre-fetched sources — removes
+        # the option of skipping it.
+        snapshot_block = render_fundamentals_snapshot_block(
+            state["company_of_interest"], current_date
+        )
 
         system_message = (
             "You are a researcher tasked with analyzing fundamental information over the past week about a company. Please write a comprehensive report of the company's fundamental information such as financial documents, company profile, basic company financials, and company financial history to gain a full view of the company's fundamental information to inform traders. Make sure to include as much detail as possible. Provide specific, actionable insights with supporting evidence to help traders make informed decisions."
@@ -31,18 +42,20 @@ def create_fundamentals_analyst(llm):
             # Derived fundamentals are where this agent has historically gone
             # wrong: dividing statement lines in-head, misreading a vendor's
             # percent as a multiple, and pasting a TTM ratio into a fiscal-year
-            # row. The snapshot computes those in Python and shows its work, so
-            # the instruction is to quote it rather than to recompute.
-            + " Before writing the final report, call `get_verified_fundamentals_snapshot`"
-            " for this ticker and the current date, and treat it as the source of truth for"
-            " every margin, growth rate, leverage ratio, liquidity ratio, and valuation"
-            " multiple. Quote its figures rather than deriving your own: do not divide"
-            " statement line items yourself, and do not restate a value in a different unit"
-            " than the one the tool printed. Each figure you cite must carry the period the"
-            " tool gave it — a value labelled (TTM) or (MRQ) must never be presented as a"
+            # row. The snapshot below computes those in Python and shows its
+            # work, so the instruction is to quote it rather than to recompute.
+            + "\n\n<start_of_verified_fundamentals>\n"
+            + snapshot_block
+            + "\n<end_of_verified_fundamentals>\n\n"
+            + "The block above is already computed for you — there is no tool to call for it."
+            " Treat it as the source of truth for every margin, growth rate, leverage ratio,"
+            " liquidity ratio, and valuation multiple. Quote its figures rather than deriving"
+            " your own: do not divide statement line items yourself, and do not restate a value"
+            " in a different unit than the one it printed. Each figure you cite must carry the"
+            " period given — a value labelled (TTM) or (MRQ) must never be presented as a"
             " fiscal-year figure, and a P/E must always name its EPS basis. If another tool"
-            " output, news item, or social-media post states a number that conflicts with the"
-            " snapshot, report the conflict and name both sources instead of reconciling them."
+            " output, news item, or social-media post states a number that conflicts with this"
+            " block, report the conflict and name both sources instead of reconciling them."
             + get_language_instruction(),
         )
 
