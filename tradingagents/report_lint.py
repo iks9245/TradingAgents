@@ -38,6 +38,19 @@ def _parse_number(value: str) -> float | None:
         return None
 
 
+# Financial prose writes a negative amount as "-$2.54B", putting the currency
+# symbol between the sign and the digits. The number pattern only accepts a sign
+# glued to the digits, so such a value parsed as +2.54 — and a free cash flow of
+# -2.54 stopped matching the same figure quoted elsewhere. Requiring the
+# currency mark keeps this away from ordinary hyphens like "1-1.5x ATR".
+_DETACHED_MINUS_RE = re.compile(r"[-−–]\s*[$¥€£]\s*$")
+
+
+def _apply_detached_sign(value: float, prefix: str) -> float:
+    """Negate ``value`` when the text before it carries a detached minus sign."""
+    return -abs(value) if _DETACHED_MINUS_RE.search(prefix) else value
+
+
 def _display_number(value: float) -> str:
     """Use a compact, stable display form in reader-facing evidence."""
     return f"{value:.2f}".rstrip("0").rstrip(".")
@@ -174,8 +187,30 @@ _METRIC_ALIASES: dict[str, tuple[str, ...]] = {
     "current_ratio": (r"\bcurrent ratio\b", r"流動比率", r"流动比率"),
     "week52_high": (r"\b52[- ]?week high\b", r"52\s*週\s*高", r"52\s*周\s*高"),
     "week52_low": (r"\b52[- ]?week low\b", r"52\s*週\s*低", r"52\s*周\s*低"),
-    "eps_diluted": (r"\bdiluted EPS\b", r"稀釋每股(?:盈餘|收益)", r"每股收益（稀釋）"),
 }
+
+# Metrics that legitimately carry one value per period. They must stay out of
+# the conflict check — a report listing five quarters of operating cash flow is
+# not contradicting itself — but they are exactly what the cross-label check
+# needs, so they are collected separately.
+_SERIES_ALIASES: dict[str, tuple[str, ...]] = {
+    "ocf": (
+        r"\boperating cash flow\b", r"\bOCF\b",
+        r"(?:經營|经营|營運|营运)(?:活動|活动)?現金流", r"(?:經營|经营|營運|营运)(?:活动)?现金流",
+    ),
+    "fcf": (
+        r"\bfree cash flow\b", r"\bFCF\b", r"自由現金流", r"自由现金流",
+    ),
+}
+
+# Pairs that must never carry the same number, and what confusing them means.
+_CROSSLABEL_PAIRS: tuple[tuple[str, str, str], ...] = (
+    (
+        "ocf", "fcf",
+        "Operating and free cash flow differ by capital expenditure. The same figure "
+        "appearing under both labels means one of them was read out of the wrong column.",
+    ),
+)
 _RATIO_METRICS = {"debt_to_equity", "current_ratio"}
 
 # How far two statements of one metric may diverge before it is a conflict,
@@ -262,9 +297,12 @@ def _is_ambiguous_pair(nearby: str, number_match: re.Match) -> bool:
     return after.startswith("/") and _NUMBER_RE.match(after[1:].lstrip()) is not None
 
 
-def _metric_values(markdown: str) -> dict[str, list[_MetricValue]]:
-    values: dict[str, list[_MetricValue]] = {metric: [] for metric in _METRIC_ALIASES}
-    for metric, aliases in _METRIC_ALIASES.items():
+def _metric_values(
+    markdown: str, table: dict[str, tuple[str, ...]] | None = None
+) -> dict[str, list[_MetricValue]]:
+    table = _METRIC_ALIASES if table is None else table
+    values: dict[str, list[_MetricValue]] = {metric: [] for metric in table}
+    for metric, aliases in table.items():
         for alias in aliases:
             for match in re.finditer(alias, markdown, flags=re.IGNORECASE):
                 # The next 40 characters are intentionally local to the alias:
@@ -281,6 +319,7 @@ def _metric_values(markdown: str) -> dict[str, list[_MetricValue]]:
                 parsed = _parse_number(number_match.group(1))
                 if parsed is None:
                     continue
+                parsed = _apply_detached_sign(parsed, nearby[: number_match.start()])
                 if not _is_bound_to_label(nearby[: number_match.start()]):
                     # The label is mentioned, but this number belongs to another
                     # clause. Reading it as the metric's value is what produced
@@ -377,6 +416,92 @@ def _metric_findings(markdown: str) -> list[Finding]:
     return findings
 
 
+def _table_series_values(markdown: str) -> dict[str, list[_MetricValue]]:
+    """Read series values out of markdown tables by column, not by adjacency.
+
+    A table says what a number is through its header, which sits on a different
+    line — so the same-line rule that keeps prose extraction honest makes tables
+    invisible. That matters here: the column *is* the label, and reading a value
+    from the wrong one is the defect this check exists to find.
+    """
+    found: dict[str, list[_MetricValue]] = {metric: [] for metric in _SERIES_ALIASES}
+    rows = markdown.split("\n")
+    index = 0
+    while index < len(rows):
+        if not rows[index].lstrip().startswith("|"):
+            index += 1
+            continue
+        block = []
+        while index < len(rows) and rows[index].lstrip().startswith("|"):
+            block.append(rows[index])
+            index += 1
+        if len(block) < 3:
+            continue
+        header = [cell.strip() for cell in block[0].strip().strip("|").split("|")]
+        columns: dict[int, str] = {}
+        for position, cell in enumerate(header):
+            for metric, aliases in _SERIES_ALIASES.items():
+                if any(re.search(alias, cell, flags=re.IGNORECASE) for alias in aliases):
+                    columns[position] = metric
+                    break
+        if not columns:
+            continue
+        for line in block[2:]:  # skip the |---| separator
+            cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+            for position, metric in columns.items():
+                if position >= len(cells):
+                    continue
+                match = _NUMBER_RE.search(cells[position])
+                if match is None:
+                    continue
+                parsed = _parse_number(match.group(1))
+                if parsed is None:
+                    continue
+                parsed = _apply_detached_sign(parsed, cells[position][: match.start()])
+                found[metric].append(_MetricValue(parsed, match.group(1), None, False))
+    return found
+
+
+def _crosslabel_findings(markdown: str) -> list[Finding]:
+    """Flag one number carried under two labels that cannot share a value.
+
+    The 2026-08-06 INTC report tabled Q1 correctly — operating cash flow 1.10B,
+    free cash flow -2.54B — and then the bear quoted -2.54B as *operating* cash
+    flow, the research manager repeated it, and the portfolio manager published
+    it as a "verified" figure. It was verified; it was simply the wrong column.
+    Neither the arithmetic check nor the conflict check can see this, because no
+    single number is wrong — the error is which name it was given.
+    """
+    findings: list[Finding] = []
+    values = _metric_values(markdown, _SERIES_ALIASES)
+    for metric, extra in _table_series_values(markdown).items():
+        values.setdefault(metric, []).extend(extra)
+    for left, right, explanation in _CROSSLABEL_PAIRS:
+        left_values = [v for v in values.get(left, []) if v.value]
+        right_values = [v for v in values.get(right, []) if v.value]
+        shared: dict[float, tuple[_MetricValue, _MetricValue]] = {}
+        for a in left_values:
+            for b in right_values:
+                scale = max(abs(a.value), abs(b.value))
+                if scale and abs(a.value - b.value) <= 0.005 * scale:
+                    shared.setdefault(a.value, (a, b))
+        for value, (a, _b) in sorted(shared.items()):
+            findings.append(
+                Finding(
+                    kind="crosslabel",
+                    summary=(
+                        f"{_display_number(value)} appears as both {left.upper()} "
+                        f"and {right.upper()}"
+                    ),
+                    detail=(
+                        f"The value {a.display} is labelled {left.upper()} in one place and "
+                        f"{right.upper()} in another. {explanation}"
+                    ),
+                )
+            )
+    return findings
+
+
 _WARNING_HEADING = "## ⚠️ Numeric consistency warnings"
 
 
@@ -409,7 +534,11 @@ def lint_report(markdown: str) -> list[Finding]:
         if not isinstance(markdown, str):
             return []
         markdown = _strip_existing_warnings(markdown)
-        return _division_findings(markdown) + _metric_findings(markdown)
+        return (
+            _division_findings(markdown)
+            + _metric_findings(markdown)
+            + _crosslabel_findings(markdown)
+        )
     except Exception:
         return []
 
@@ -418,7 +547,7 @@ def render_warning_block(findings: list[Finding]) -> str:
     """Render findings as the prominent warning block for the consolidated report."""
     if not findings:
         return ""
-    severity = {"arithmetic": 0, "unit": 1, "conflict": 2}
+    severity = {"arithmetic": 0, "unit": 1, "crosslabel": 2, "conflict": 3}
     ordered = sorted(findings, key=lambda finding: severity.get(finding.kind, len(severity)))
     lines = [
         "> ## ⚠️ Numeric consistency warnings",
