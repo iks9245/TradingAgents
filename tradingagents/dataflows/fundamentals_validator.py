@@ -144,6 +144,14 @@ def _financial_currency(ticker: yf.Ticker) -> str:
     return info.get("financialCurrency") or info.get("currency") or "reporting currency"
 
 
+def _vendor_info(ticker: yf.Ticker) -> dict:
+    """The vendor's summary dict, or an empty one when it is unavailable."""
+    try:
+        return yf_retry(lambda: ticker.info) or {}
+    except Exception:  # noqa: BLE001 -- the ratio cross-check is optional
+        return {}
+
+
 def _latest_close(symbol: str, curr_date: str) -> float | None:
     """Return the last close on or before the requested date, never inventing one."""
     try:
@@ -345,6 +353,151 @@ def _append_operating_income_crosscheck(
         ]
 
 
+# Vendor ratio fields, and the statement rows that reproduce them.
+_VENDOR_RATIOS: tuple[tuple[str, str, str], ...] = (
+    ("operatingMargins", "Operating margin", "operating_income"),
+    ("profitMargins", "Net margin", "net_income"),
+    ("grossMargins", "Gross margin", "gross_profit"),
+)
+
+# How close a recomputed window must be, in percentage points, to be called a
+# match for the vendor's figure.
+_RATIO_MATCH_TOLERANCE_PP = 0.25
+
+
+def _append_vendor_ratio_crosscheck(
+    lines: list[str], info: dict, quarterly: pd.DataFrame
+) -> None:
+    """Resolve which period each vendor ratio actually covers.
+
+    yfinance publishes ``profitMargins`` and ``operatingMargins`` side by side
+    in one flat dict, but they cover different windows: the profit margin is
+    trailing-twelve-month while the operating margin is the most recent quarter
+    alone. Checked against INTC, AAPL, MSFT, NVDA and TSM, each matches its own
+    window exactly. Assuming a shared period is how Intel's single-quarter
+    12.19% operating margin was reported as its trailing-twelve-month figure,
+    when four quarters of its own statements give 7.55%.
+
+    Rather than assert a period, this recomputes both windows from the
+    statements and reports which one the vendor's number reproduces — and says
+    so plainly when it reproduces neither.
+    """
+    if not isinstance(info, dict) or quarterly is None or quarterly.empty:
+        return
+    parts = _income_components(quarterly)
+    periods = _periods(parts["revenue"], limit=4)
+    if not periods:
+        return
+
+    def _window(measure: str, count: int) -> tuple[float | None, str]:
+        used = periods[:count]
+        revenue = [_value(parts["revenue"], p) for p in used]
+        values = [_value(parts[measure], p) for p in used]
+        if any(v is None for v in revenue + values) or not revenue:
+            return None, "N/A"
+        total_rev, total_val = sum(revenue), sum(values)
+        ratio = safe_ratio(total_val, total_rev)
+        if ratio is None:
+            return None, "N/A"
+        return ratio * 100, f"{ratio * 100:.2f}%  ({_millions(total_val)} / {_millions(total_rev)})"
+
+    rows: list[str] = []
+    unmatched: list[str] = []
+    for field, label, measure in _VENDOR_RATIOS:
+        raw = info.get(field)
+        vendor = None if raw is None else safe_ratio(raw, 1)
+        if vendor is None:
+            continue
+        vendor_pct = vendor * 100
+        mrq, mrq_text = _window(measure, 1)
+        ttm, ttm_text = _window(measure, 4)
+        match = "⚠️ neither"
+        if mrq is not None and abs(vendor_pct - mrq) <= _RATIO_MATCH_TOLERANCE_PP:
+            match = "most recent quarter"
+        elif ttm is not None and abs(vendor_pct - ttm) <= _RATIO_MATCH_TOLERANCE_PP:
+            match = "trailing 12 months"
+        else:
+            unmatched.append(f"- `{field}` ({vendor_pct:.2f}%) matches neither window.")
+        rows.append(
+            f"| {label} (`{field}`) | {vendor_pct:.2f}% | {match} | {mrq_text} | {ttm_text} |"
+        )
+
+    if not rows:
+        return
+
+    lines += [
+        "",
+        "### Vendor ratio cross-check",
+        "",
+        f"The vendor publishes these ratios without a period. Recomputed here from the "
+        f"statements over both windows; the matching column says which one each number "
+        f"actually is. Latest quarter used: {periods[0]:%Y-%m-%d}.",
+        "",
+        "| Vendor field | Vendor value | Period it matches | Most recent quarter | Trailing 12 months |",
+        "|---|---:|---|---:|---:|",
+    ] + rows + [
+        "",
+        "Quote a vendor ratio only with the period named in the matching column. These "
+        "windows are not interchangeable: a single strong quarter and a trailing year "
+        "can point in opposite directions.",
+    ]
+    if unmatched:
+        lines += [
+            "",
+            "**A vendor ratio does not reproduce either window from the statements.**",
+        ] + unmatched + [
+            "Treat it as unverified: state the statement-derived figure and its window "
+            "instead, and do not attach a period to the vendor's number.",
+        ]
+
+
+# Statement rows whose name promises a benefit. A negative value under one of
+# these is a loss wearing a gain's label, and a reader who trusts the label
+# inverts the sign: Intel's 2026 Q2 "Gain On Sale Of Security" holds -12.476B,
+# and a shipped report published it as a 12.43B non-cash *gain*, then used it to
+# explain away the quarter's net loss.
+_GAIN_WORDS = ("gain",)
+
+
+def _append_sign_label_check(lines: list[str], quarterly: pd.DataFrame, currency: str) -> None:
+    """Flag statement rows whose label implies a gain but whose value is negative."""
+    if quarterly is None or quarterly.empty:
+        return
+    findings: list[str] = []
+    for row_label in quarterly.index:
+        name = str(row_label)
+        if not any(word in name.casefold() for word in _GAIN_WORDS):
+            continue
+        series = quarterly.loc[row_label]
+        if isinstance(series, pd.DataFrame):  # duplicated label; not worth guessing
+            continue
+        for period in _periods(series, limit=4):
+            value = _value(series, period)
+            if value is None or value >= 0:
+                continue
+            findings.append(
+                f"| {period:%Y-%m-%d} | {name} | {_millions(value)} | "
+                f"a LOSS of {_millions(abs(value))} |"
+            )
+    if not findings:
+        return
+    lines += [
+        "",
+        "### Sign-versus-label contradictions",
+        "",
+        f"Units: millions of {currency}. These rows are named as gains but hold negative "
+        "values, which means the opposite of what the label says.",
+        "",
+        "| Period | Row label | Value as stored | What it actually is |",
+        "|---|---|---:|---|",
+    ] + findings + [
+        "",
+        "Report each of these as the loss it is. Do not describe a negative row named "
+        "\"Gain ...\" as a gain, and do not cite one as a benign or offsetting item when "
+        "explaining a net loss — it is part of the loss.",
+    ]
+
+
 def _append_balance_section(lines: list[str], quarterly: pd.DataFrame, currency: str) -> None:
     assets = _row(quarterly, "Total Assets")
     liabilities = _row(quarterly, "Total Liabilities Net Minority Interest", "Total Liabilities")
@@ -434,6 +587,37 @@ def _append_cash_flow_section(lines: list[str], annual: pd.DataFrame, quarterly:
                 if latest_value is None and old_value is None:
                     continue
                 lines.append(f"| {label} | {_millions(latest_value)} | {_millions(old_value)} | {_growth(latest_value, old_value, money=True)} |")
+
+    # A table conveys "which column am I in" by position, and that information
+    # does not survive being lifted into prose. On the 2026-08-06 INTC report
+    # Q1's free cash flow of -2,540 was quoted as its *operating* cash flow by
+    # the bear, then by the research manager, then by the portfolio manager —
+    # who labelled it "verified". Both numbers were verified; the column was
+    # not. These lines carry each figure's identity next to the figure, so a
+    # copied fragment stays self-describing.
+    labelled = []
+    for period in _periods(q_ocf, q_capex, q_fcf, limit=5):
+        ocf, capex, fcf = _value(q_ocf, period), _value(q_capex, period), _value(q_fcf, period)
+        if ocf is None and fcf is None:
+            continue
+        capex_spend = None if capex is None else abs(capex)
+        labelled.append(
+            f"- {period:%Y-%m-%d}: OCF {_millions(ocf)} | capex {_millions(capex_spend)} "
+            f"| FCF {_millions(fcf)}"
+        )
+    if labelled:
+        lines += [
+            "",
+            "### Cash flow — labelled series (quote these lines, not table columns)",
+            "",
+            f"Units: millions of {currency}. Every figure carries its own name, so a value "
+            "lifted out of context cannot lose which measure it is.",
+            "",
+        ] + labelled + [
+            "",
+            "OCF and FCF are different measures and differ by capex. Never restate one as "
+            "the other, and always name which you are quoting.",
+        ]
 
     if periods or quarter_periods:
         lines += ["", "> Capex and free-cash-flow growth rates differ between the annual and quarterly views. State which one you are quoting, with the period. Do not describe a +83.5% quarterly change as \"doubled\"."]
@@ -590,6 +774,8 @@ def build_verified_fundamentals_snapshot(
     currency = _financial_currency(ticker)
     annual_eps = _append_income_sections(lines, annual_income, currency)
     _append_operating_income_crosscheck(lines, quarterly_income, annual_income, currency)
+    _append_vendor_ratio_crosscheck(lines, _vendor_info(ticker), quarterly_income)
+    _append_sign_label_check(lines, quarterly_income, currency)
     _append_balance_section(lines, quarterly_balance, currency)
     _append_cash_flow_section(lines, annual_cashflow, quarterly_cashflow, currency)
     _append_price_statistics_section(lines, symbol, curr_date, currency)

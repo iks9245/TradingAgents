@@ -299,10 +299,18 @@ _FUNDAMENTAL_FIELDS: tuple[tuple[str, str, str], ...] = (
     ("Gross Profit (TTM)", "grossProfits", "money"),
     ("EBITDA (TTM)", "ebitda", "money"),
     ("Net Income to Common (TTM)", "netIncomeToCommon", "money"),
-    ("Profit Margin (TTM)", "profitMargins", "fraction_pct"),
-    ("Operating Margin (TTM)", "operatingMargins", "fraction_pct"),
-    ("Return on Equity (TTM)", "returnOnEquity", "fraction_pct"),
-    ("Return on Assets (TTM)", "returnOnAssets", "fraction_pct"),
+    # These carry no period label on purpose. yfinance's ``profitMargins`` is a
+    # trailing-twelve-month figure but ``operatingMargins`` is the most recent
+    # quarter — verified across INTC, AAPL, MSFT, NVDA and TSM, where each
+    # matches its window to the cent. Labelling both "(TTM)" here is what let a
+    # single quarter's 12.19% operating margin be reported as Intel's
+    # trailing-twelve-month margin, when the statements give 7.55% over four
+    # quarters. The period is resolved per field, from the statements, in the
+    # verified snapshot's ratio cross-check.
+    ("Profit Margin (vendor ratio)", "profitMargins", "fraction_pct"),
+    ("Operating Margin (vendor ratio)", "operatingMargins", "fraction_pct"),
+    ("Return on Equity (vendor ratio)", "returnOnEquity", "fraction_pct"),
+    ("Return on Assets (vendor ratio)", "returnOnAssets", "fraction_pct"),
     ("Debt to Equity (MRQ)", "debtToEquity", "percent_and_multiple"),
     ("Current Ratio (MRQ)", "currentRatio", "multiple"),
     ("Book Value per Share (MRQ)", "bookValue", "price"),
@@ -330,6 +338,11 @@ _FUNDAMENTALS_PREAMBLE = (
     "# - The period in each label is binding. (TTM) is trailing-twelve-month and\n"
     "#   (MRQ) is most-recent-quarter. Neither is a fiscal-year figure: do NOT\n"
     "#   place a (TTM) or (MRQ) value in a row labelled with a fiscal year.\n"
+    "# - A field marked (vendor ratio) has NO period you may assume. This vendor\n"
+    "#   mixes windows: its profit margin is trailing-twelve-month while its\n"
+    "#   operating margin is a single quarter. The verified fundamentals snapshot\n"
+    "#   resolves each one against the statements — quote the period it reports,\n"
+    "#   and never call one of these a TTM figure on your own authority.\n"
     "# - For fiscal-year figures and for any ratio computed from them, use\n"
     "#   `get_verified_fundamentals_snapshot`, which recomputes them from the\n"
     "#   statements and shows its arithmetic. Do not divide these fields yourself.\n"

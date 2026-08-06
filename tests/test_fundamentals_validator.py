@@ -231,3 +231,75 @@ class TestOperatingIncomeCrossCheck:
     def test_section_is_skipped_when_the_rows_are_absent(self, monkeypatch):
         snapshot = self._snapshot(monkeypatch, _frame({"Diluted EPS": [0.8]}, ["2026-06-30"]))
         assert "Operating income cross-check" not in snapshot
+
+
+@pytest.mark.unit
+class TestVendorRatioAndSignChecks:
+    """Vendor ratio periods and sign/label traps, from the 2026-08-06 INTC report."""
+
+    def _snapshot(self, monkeypatch, quarterly: pd.DataFrame, info: dict) -> str:
+        fake = _ticker()
+        fake.quarterly_income_stmt = quarterly
+        fake.income_stmt = pd.DataFrame()
+        fake.info = info
+        monkeypatch.setattr(validator.yf, "Ticker", lambda symbol: fake)
+        monkeypatch.setattr(validator, "load_ohlcv", lambda s, d: pd.DataFrame())
+        return validator.build_verified_fundamentals_snapshot("INTC", "2026-06-30")
+
+    def _four_quarters(self) -> pd.DataFrame:
+        # Revenue and operating income chosen so the two windows differ sharply:
+        # latest quarter 12.19%, trailing four quarters 7.55% — Intel's real gap.
+        return _frame({
+            "Total Revenue": [16_128e6, 13_577e6, 13_674e6, 13_653e6],
+            "Operating Income": [1_966e6, 934e6, 550e6, 858e6],
+            "Gross Profit": [6_509e6, 5_347e6, 4_943e6, 5_218e6],
+            "Net Income": [-11_033e6, -3_728e6, -591e6, 4_063e6],
+        }, ["2026-06-30", "2026-03-31", "2025-12-31", "2025-09-30"])
+
+    def test_a_single_quarter_ratio_is_not_called_trailing_twelve_months(self, monkeypatch):
+        snapshot = self._snapshot(
+            monkeypatch, self._four_quarters(), {"operatingMargins": 0.1219}
+        )
+        assert "most recent quarter" in snapshot
+        # Both windows are shown, so the 4.6pp gap is visible rather than implied.
+        assert "12.19%" in snapshot and "7.55%" in snapshot
+
+    def test_a_trailing_ratio_is_identified_as_trailing(self, monkeypatch):
+        snapshot = self._snapshot(
+            monkeypatch, self._four_quarters(), {"profitMargins": -0.1979}
+        )
+        assert "trailing 12 months" in snapshot
+
+    def test_a_ratio_matching_neither_window_is_flagged(self, monkeypatch):
+        snapshot = self._snapshot(
+            monkeypatch, self._four_quarters(), {"operatingMargins": 0.42}
+        )
+        assert "⚠️ neither" in snapshot
+        assert "does not reproduce either window" in snapshot
+
+    def test_a_negative_gain_row_is_reported_as_a_loss(self, monkeypatch):
+        quarterly = _frame({
+            "Total Revenue": [16_128e6], "Gross Profit": [6_509e6],
+            "Gain On Sale Of Security": [-12_476e6],
+        }, ["2026-06-30"])
+        snapshot = self._snapshot(monkeypatch, quarterly, {})
+        assert "Sign-versus-label contradictions" in snapshot
+        assert "a LOSS of 12,476" in snapshot
+        assert "it is part of the loss" in snapshot
+
+    def test_a_positive_gain_row_is_left_alone(self, monkeypatch):
+        quarterly = _frame({
+            "Total Revenue": [16_128e6], "Gross Profit": [6_509e6],
+            "Gain On Sale Of Security": [1_200e6],
+        }, ["2026-06-30"])
+        assert "Sign-versus-label contradictions" not in self._snapshot(monkeypatch, quarterly, {})
+
+    def test_cash_flow_values_carry_their_own_labels(self, monkeypatch):
+        # A value lifted out of a table loses its column; these lines do not.
+        fake = _ticker()
+        monkeypatch.setattr(validator.yf, "Ticker", lambda symbol: fake)
+        monkeypatch.setattr(validator, "load_ohlcv", lambda s, d: pd.DataFrame())
+        snapshot = validator.build_verified_fundamentals_snapshot("AMD", "2025-12-31")
+        assert "labelled series" in snapshot
+        assert "OCF" in snapshot and "FCF" in snapshot
+        assert "Never restate one as the other" in snapshot
