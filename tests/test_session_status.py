@@ -8,7 +8,7 @@ trading day's close, high, low, and volume.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -105,3 +105,54 @@ class TestDegradedInputs:
     def test_naive_now_is_treated_as_utc(self):
         naive = datetime(2026, 8, 5, 14, 0)
         assert classify_bar_status("2026-08-05", "AMD", naive).status == BAR_IN_PROGRESS
+
+
+@pytest.mark.unit
+class TestSessionSettledAt:
+    """The settlement instant, used to decide whether a cached file is stale."""
+
+    def test_us_equity_settles_after_the_close_plus_buffer(self):
+        from tradingagents.dataflows.session_status import (
+            SETTLEMENT_BUFFER_MINUTES,
+            session_settled_at,
+        )
+
+        settled = session_settled_at("2026-08-05", "INTC")
+        # 16:00 New York on 2026-08-05 is 20:00 UTC; plus the buffer.
+        assert settled == _utc("2026-08-05 20:00") + timedelta(minutes=SETTLEMENT_BUFFER_MINUTES)
+
+    def test_crypto_settles_at_the_next_utc_midnight(self):
+        from tradingagents.dataflows.session_status import session_settled_at
+
+        assert session_settled_at("2026-08-05", "BTC-USD") == _utc("2026-08-06 00:00")
+
+    def test_tokyo_settles_on_the_tokyo_clock(self):
+        from tradingagents.dataflows.session_status import (
+            SETTLEMENT_BUFFER_MINUTES,
+            session_settled_at,
+        )
+
+        # 15:00 Tokyo on 2026-08-05 is 06:00 UTC.
+        assert session_settled_at("2026-08-05", "JP225") == _utc(
+            "2026-08-05 06:00"
+        ) + timedelta(minutes=SETTLEMENT_BUFFER_MINUTES)
+
+    def test_unparseable_date_returns_none(self):
+        from tradingagents.dataflows.session_status import session_settled_at
+
+        assert session_settled_at("not-a-date", "INTC") is None
+
+    def test_settlement_agrees_with_the_status_classifier(self):
+        # One clock, two views: a bar is FINAL exactly when "now" has passed the
+        # settlement instant. Drift between them would let a cache be judged
+        # stale while its bar is called settled.
+        from tradingagents.dataflows.session_status import (
+            BAR_FINAL,
+            classify_bar_status,
+            session_settled_at,
+        )
+
+        settled = session_settled_at("2026-08-05", "INTC")
+        assert classify_bar_status("2026-08-05", "INTC", settled).status == BAR_FINAL
+        just_before = settled - timedelta(minutes=1)
+        assert classify_bar_status("2026-08-05", "INTC", just_before).status != BAR_FINAL

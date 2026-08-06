@@ -17,7 +17,7 @@ is auditable rather than implicit.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, time, timezone
+from datetime import datetime, time, timedelta, timezone
 
 import pytz
 
@@ -101,6 +101,28 @@ def _session_for(symbol: str) -> tuple[str, time | None, str]:
     return tz_name, close, "equity (assumed US listing)"
 
 
+def session_settled_at(latest_bar_date, symbol: str) -> datetime | None:
+    """UTC instant at which the daily bar dated ``latest_bar_date`` becomes final.
+
+    The same exchange clock ``classify_bar_status`` uses, exposed as a timestamp
+    so callers can ask whether something that happened at a known moment — a
+    cache write, say — happened before or after the session settled. Returns
+    None when the date cannot be parsed, so callers can fall back rather than
+    treat an unknown as settled.
+    """
+    date = _coerce_date(latest_bar_date)
+    if date is None:
+        return None
+    tz_name, close, _ = _session_for(symbol)
+    tz = pytz.timezone(tz_name)
+    if close is None:
+        # A 24-hour instrument's daily bar is final only once the day rolls over.
+        local = tz.localize(datetime.combine(date + timedelta(days=1), time(0, 0)))
+    else:
+        local = tz.localize(datetime.combine(date, close)) + _buffer()
+    return local.astimezone(timezone.utc)
+
+
 def classify_bar_status(
     latest_bar_date,
     symbol: str,
@@ -180,7 +202,6 @@ def classify_bar_status(
 
 
 def _buffer():
-    from datetime import timedelta
     return timedelta(minutes=SETTLEMENT_BUFFER_MINUTES)
 
 
