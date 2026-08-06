@@ -217,6 +217,134 @@ def _append_income_sections(lines: list[str], annual: pd.DataFrame, currency: st
     return diluted_eps
 
 
+def _income_components(df: pd.DataFrame) -> dict[str, pd.Series | None]:
+    """The income-statement rows needed to rebuild operating income."""
+    return {
+        "revenue": _row(df, "Total Revenue", "Operating Revenue"),
+        "gross_profit": _row(df, "Gross Profit"),
+        "operating_income": _row(df, "Operating Income", "Total Operating Income As Reported"),
+        "rd": _row(df, "Research And Development"),
+        "sga": _row(df, "Selling General And Administration"),
+        "restructuring": _row(df, "Restructuring And Mergern Acquisition", "Restructuring And Merger Acquisition"),
+        "amortization": _row(df, "Amortization Of Intangibles Income Statement"),
+        "other_opex": _row(df, "Other Operating Expenses"),
+        "net_income": _row(df, "Net Income", "Net Income Common Stockholders"),
+        "diluted_eps": _row(df, "Diluted EPS"),
+    }
+
+
+def _recomputed_operating_income(parts: dict, period: pd.Timestamp) -> tuple[float | None, float | None]:
+    """Rebuild operating income from the expense lines; return (recomputed, opex_total)."""
+    gross = _value(parts["gross_profit"], period)
+    if gross is None:
+        return None, None
+    opex = 0.0
+    seen = False
+    for key in ("rd", "sga", "restructuring", "amortization", "other_opex"):
+        amount = _value(parts[key], period)
+        if amount is not None:
+            opex += abs(amount)
+            seen = True
+    if not seen:
+        return None, None
+    return gross - opex, opex
+
+
+def _append_operating_income_crosscheck(
+    lines: list[str], quarterly: pd.DataFrame, annual: pd.DataFrame, currency: str
+) -> None:
+    """Check the vendor's operating income against its own expense lines.
+
+    yfinance reports INTC's 2026 Q2 operating income as 1,966M while its own
+    itemised lines give 1,805M — the 161M restructuring charge is absent from
+    the vendor's ``Total Expenses`` but present as its own row. That inflated
+    figure reached a shipped report as "operating income swung to $1.97B", and
+    the same omission turned a GAAP operating *loss* in Q1 into an apparent
+    profit, which the bull, the research manager and the portfolio manager each
+    cited as proof of a turnaround.
+
+    This detects internal inconsistency only. When the vendor's own expense row
+    is itself understated, no arithmetic over its numbers can recover the filed
+    figure — the note below says so rather than implying the recomputed value is
+    authoritative.
+    """
+    rows: list[str] = []
+    mismatch_notes: list[str] = []
+    for label, df, limit in (("Quarter", quarterly, 4), ("Fiscal year", annual, 2)):
+        parts = _income_components(df)
+        for period in _periods(parts["operating_income"], parts["gross_profit"], limit=limit):
+            reported = _value(parts["operating_income"], period)
+            recomputed, _ = _recomputed_operating_income(parts, period)
+            if reported is None or recomputed is None:
+                continue
+            revenue = _value(parts["revenue"], period)
+            difference = reported - recomputed
+            # Scale the tolerance to revenue: an operating income near zero
+            # would make a relative test fire on rounding alone.
+            allowed = max(0.005 * abs(revenue), 1_000_000.0) if revenue else 1_000_000.0
+            # One-sided on purpose. ``difference > 0`` means the vendor booked
+            # LESS expense than the rows it itemises — its operating income is
+            # inflated by something it listed and then ignored, which is the
+            # defect worth reporting. ``difference < 0`` only means this code
+            # does not know every expense row the vendor uses (AMD carries an
+            # intangibles-amortization line that older versions of this check
+            # missed), and flagging that would blame the vendor for a gap in our
+            # own enumeration.
+            ok = difference <= allowed
+            status = "consistent" if ok else "⚠️ MISMATCH"
+            rows.append(
+                f"| {label} {period:%Y-%m-%d} | {_millions(reported)} | {_millions(recomputed)} | "
+                f"{_millions(difference)} | {status} |"
+            )
+            if ok:
+                continue
+            restructuring = _value(parts["restructuring"], period)
+            cause = ""
+            if restructuring is not None and abs(abs(restructuring) - abs(difference)) <= allowed:
+                cause = (
+                    f" The gap equals the restructuring/M&A line ({_millions(abs(restructuring))}), "
+                    f"which the vendor's operating income excludes."
+                )
+            mismatch_notes.append(
+                f"- {label} {period:%Y-%m-%d}: reported {_millions(reported)} vs "
+                f"{_millions(recomputed)} from the line items.{cause}"
+            )
+
+    if not rows:
+        return
+
+    lines += [
+        "",
+        "### Operating income cross-check",
+        "",
+        f"Units: millions of {currency}. Recomputed = gross profit − (R&D + SG&A + "
+        "restructuring/M&A + other operating expenses).",
+        "",
+        "| Period | Vendor reported | Recomputed from line items | Difference | Status |",
+        "|---|---:|---:|---:|---|",
+    ] + rows
+
+    if mismatch_notes:
+        lines += [
+            "",
+            "**The vendor's operating income does not reconcile with its own statement lines.**",
+        ] + mismatch_notes + [
+            "",
+            "Do not describe operating income or operating margin for a mismatched period as "
+            "a GAAP figure, and do not build a turnaround narrative on it — state both values "
+            "and say they disagree. Two limits of this check: it compares the vendor against "
+            "itself, so if an expense line is understated at source the recomputed figure is "
+            "wrong too; and it only reports income that looks too high, so a period marked "
+            "consistent is not thereby confirmed. Neither number here is a substitute for the "
+            "filed statement.",
+        ]
+    else:
+        lines += [
+            "",
+            "Reported and recomputed operating income agree for every period shown.",
+        ]
+
+
 def _append_balance_section(lines: list[str], quarterly: pd.DataFrame, currency: str) -> None:
     assets = _row(quarterly, "Total Assets")
     liabilities = _row(quarterly, "Total Liabilities Net Minority Interest", "Total Liabilities")
@@ -461,6 +589,7 @@ def build_verified_fundamentals_snapshot(
     ]
     currency = _financial_currency(ticker)
     annual_eps = _append_income_sections(lines, annual_income, currency)
+    _append_operating_income_crosscheck(lines, quarterly_income, annual_income, currency)
     _append_balance_section(lines, quarterly_balance, currency)
     _append_cash_flow_section(lines, annual_cashflow, quarterly_cashflow, currency)
     _append_price_statistics_section(lines, symbol, curr_date, currency)
