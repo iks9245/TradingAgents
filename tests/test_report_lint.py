@@ -184,3 +184,52 @@ def test_writer_inserts_and_persists_warnings_only_when_needed(tmp_path):
 def test_malformed_input_never_raises():
     malformed = "(" + "1,2,3 / / 4" + "9" * 50_000
     assert isinstance(lint_report(malformed), list)
+
+
+@pytest.mark.unit
+class TestCrossLabelConfusion:
+    """One number carried under two labels that cannot share a value.
+
+    The 2026-08-06 INTC report tabled Q1 correctly — OCF 1.10B, FCF -2.54B —
+    and then the bear quoted -2.54B as *operating* cash flow, the research
+    manager repeated it, and the portfolio manager published it as "verified".
+    Every number was verified; only the column was wrong.
+    """
+
+    REPORT = (
+        "| Quarter | Operating Cash Flow | Free Cash Flow | CapEx |\n"
+        "|---------|---------------------|----------------|-------|\n"
+        "| Q2 2026 | 7.01B | 4.45B | -2.56B |\n"
+        "| Q1 2026 | 1.10B | -2.54B | -3.64B |\n\n"
+        "Prior quarters showed OCF of -$2.54B and $1.10B, hardly a trend.\n"
+    )
+
+    def test_the_swapped_column_is_caught(self):
+        findings = lint_report(self.REPORT)
+        assert any(f.kind == "crosslabel" for f in findings)
+        assert any("OCF and FCF" in f.summary for f in findings)
+
+    def test_a_correctly_quoted_report_is_clean(self):
+        clean = self.REPORT.replace(
+            "OCF of -$2.54B and $1.10B", "OCF of $1.10B and FCF of -$2.54B"
+        )
+        assert [f for f in lint_report(clean) if f.kind == "crosslabel"] == []
+
+    def test_a_detached_minus_sign_is_read_as_negative(self):
+        from tradingagents.report_lint import _apply_detached_sign
+
+        # "-$2.54B" puts the currency mark between the sign and the digits.
+        assert _apply_detached_sign(2.54, "OCF of -$") == -2.54
+        assert _apply_detached_sign(2.54, "OCF of $") == 2.54
+        # ...but a plain hyphen is a range or a dash, not a sign.
+        assert _apply_detached_sign(1.5, "stop at 1-") == 1.5
+
+    def test_a_series_of_quarters_is_not_a_conflict(self):
+        # Five quarters of operating cash flow are five facts, not a
+        # contradiction — series metrics must stay out of the conflict check.
+        series = (
+            "| Quarter | Operating Cash Flow | Free Cash Flow |\n"
+            "|---|---|---|\n"
+            "| Q2 | 7.01B | 4.45B |\n| Q1 | 1.10B | 0.80B |\n| Q4 | 4.29B | 0.12B |\n"
+        )
+        assert [f for f in lint_report(series) if f.kind == "conflict"] == []
