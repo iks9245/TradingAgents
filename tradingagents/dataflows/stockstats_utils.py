@@ -1,6 +1,7 @@
 import logging
 import os
 import time
+from datetime import datetime, timezone
 from typing import Annotated
 
 import pandas as pd
@@ -9,6 +10,7 @@ from stockstats import wrap
 from yfinance.exceptions import YFRateLimitError
 
 from .config import get_config
+from .session_status import session_settled_at
 from .symbol_utils import NoMarketDataError, normalize_symbol
 from .utils import safe_ticker_component
 
@@ -128,21 +130,44 @@ def _assert_ohlcv_not_stale(
         )
 
 
-def _needs_same_day_refresh(data_file, curr_date_dt, today_date) -> bool:
+def _needs_same_day_refresh(data_file, curr_date_dt, today_date, symbol=None) -> bool:
     """Whether a cached frame must be refetched to reflect the requested day.
 
     The cache file is keyed per day, so without this a run started before the
     day's bar was final keeps serving that snapshot to every later run (#1150).
-    Two distinct staleness cases exist for a current-day request: the bar may be
-    missing entirely, or present but still in progress — Yahoo publishes a
-    partial daily candle during market hours, whose ``Close`` is not the closing
-    price. Row inspection cannot tell a partial bar from a final one, so the TTL
-    governs every current-day cache. Historical requests always reuse the cache,
-    since those rows are immutable.
+    Two distinct staleness cases exist: the bar may be missing entirely, or
+    present but still in progress — Yahoo publishes a partial daily candle
+    during market hours, whose ``Close`` is not the closing price. Row
+    inspection cannot tell a partial bar from a final one.
+
+    The question that decides it is not "is the requested date before today"
+    but "was this file written after the requested session settled". Comparing
+    calendar dates on the *host's* clock made every US session look like history
+    to anyone east of the Americas: at 06:26 in Taipei on 6 August, a request
+    for 5 August was judged immutable although New York had closed barely two
+    hours earlier — so a cache written during that session, holding a partial
+    bar, was served as settled history. That is how a report published 100.42
+    as Intel's 5 August close when the settled close was 101.06.
+
+    Settlement comes from the exchange's own clock, so the judgement no longer
+    depends on where the machine happens to be. A cache written before the
+    session settled is refetched, bounded by the TTL so repeated intraday runs
+    cannot hammer the vendor.
     """
+    mtime = os.path.getmtime(data_file)
+    settled = session_settled_at(curr_date_dt, symbol or "")
+    if settled is not None:
+        written = datetime.fromtimestamp(mtime, tz=timezone.utc)
+        if written >= settled:
+            # Written after the session closed: those rows are immutable.
+            return False
+        return time.time() - mtime > OHLCV_CACHE_TTL_SECONDS
+
+    # Unparseable date: fall back to the host-calendar comparison rather than
+    # guessing that an unknown session has settled.
     if curr_date_dt.date() < today_date.date():
         return False
-    return time.time() - os.path.getmtime(data_file) > OHLCV_CACHE_TTL_SECONDS
+    return time.time() - mtime > OHLCV_CACHE_TTL_SECONDS
 
 
 def load_ohlcv(symbol: str, curr_date: str) -> pd.DataFrame:
@@ -187,7 +212,7 @@ def load_ohlcv(symbol: str, curr_date: str) -> pd.DataFrame:
         if (
             not cached.empty
             and "Close" in cached.columns
-            and not _needs_same_day_refresh(data_file, curr_date_dt, today_date)
+            and not _needs_same_day_refresh(data_file, curr_date_dt, today_date, canonical)
         ):
             data = cached
 
