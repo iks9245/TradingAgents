@@ -183,7 +183,10 @@ def test_invoke_structured_falls_back_when_result_is_none():
     out = invoke_structured_or_freetext(
         structured, plain, "prompt", render=lambda r: r.rating, agent_name="t"
     )
-    assert out == "FREETEXT"
+    # The prose still reaches the caller, now labelled as having skipped the
+    # schema checks rather than passing them.
+    assert "FREETEXT" in out
+    assert "Unvalidated output" in out
     plain.invoke.assert_called_once()
 
 
@@ -228,7 +231,8 @@ class TestTraderAgent:
         llm.invoke.return_value = MagicMock(content=plain_response)
         trader = create_trader(llm)
         result = trader(_make_trader_state())
-        assert result["trader_investment_plan"] == plain_response
+        assert plain_response in result["trader_investment_plan"]
+        assert "Unvalidated output" in result["trader_investment_plan"]
 
 
 # ---------------------------------------------------------------------------
@@ -300,7 +304,8 @@ class TestResearchManagerAgent:
         llm.invoke.return_value = MagicMock(content=plain_response)
         rm = create_research_manager(llm)
         result = rm(_make_rm_state())
-        assert result["investment_plan"] == plain_response
+        assert plain_response in result["investment_plan"]
+        assert "Unvalidated output" in result["investment_plan"]
 
 
 # ---------------------------------------------------------------------------
@@ -414,7 +419,9 @@ class TestSentimentAnalystAgent:
         llm = MagicMock()
         llm.with_structured_output.side_effect = NotImplementedError("provider unsupported")
         llm.invoke.return_value = MagicMock(content=plain)
-        assert create_sentiment_analyst(llm)(_make_sentiment_state())["sentiment_report"] == plain
+        report = create_sentiment_analyst(llm)(_make_sentiment_state())["sentiment_report"]
+        assert plain in report
+        assert "Unvalidated output" in report
 
     def test_falls_back_to_freetext_when_structured_call_fails(self):
         plain = "Fallback free-text sentiment."
@@ -423,4 +430,6 @@ class TestSentimentAnalystAgent:
         llm = MagicMock()
         llm.with_structured_output.return_value = structured
         llm.invoke.return_value = MagicMock(content=plain)
-        assert create_sentiment_analyst(llm)(_make_sentiment_state())["sentiment_report"] == plain
+        report = create_sentiment_analyst(llm)(_make_sentiment_state())["sentiment_report"]
+        assert plain in report
+        assert "Unvalidated output" in report

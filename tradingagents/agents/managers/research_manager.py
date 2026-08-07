@@ -52,6 +52,7 @@ Commit to a clear stance whenever the debate's strongest arguments warrant one; 
             prompt,
             render_research_plan,
             "Research Manager",
+            bypassed_checks="the rating-scale field check",
         )
 
         new_investment_debate_state = {

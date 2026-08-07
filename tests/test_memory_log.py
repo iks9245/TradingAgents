@@ -737,7 +737,10 @@ class TestPortfolioManagerInjection:
         llm.invoke.return_value = MagicMock(content=plain_response)
         pm_node = create_portfolio_manager(llm)
         result = pm_node(_make_pm_state())
-        assert result["final_trade_decision"] == plain_response
+        # The prose still reaches the caller, now labelled as having skipped
+        # the schema checks rather than passing them.
+        assert plain_response in result["final_trade_decision"]
+        assert "Unvalidated output" in result["final_trade_decision"]
 
     # get_past_context ordering and limits
 

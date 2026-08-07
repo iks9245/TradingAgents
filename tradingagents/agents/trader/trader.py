@@ -73,6 +73,10 @@ def create_trader(llm):
             messages,
             functools.partial(render_trader_proposal, levels=levels),
             "Trader",
+            bypassed_checks=(
+                "the position-intent coherence check, the stop-loss direction check, "
+                "and the computed ATR distance check"
+            ),
         )
 
         return {

@@ -96,6 +96,7 @@ Be decisive and ground every conclusion in specific evidence from the analysts.
             prompt,
             render_pm_decision,
             "Portfolio Manager",
+            bypassed_checks="the rating-scale and price-target field checks",
         )
 
         new_risk_debate_state = {
