@@ -36,6 +36,21 @@ class ReportPaths:
     html: Path | None = None
 
 
+def _code_revision() -> str:
+    """The revision string, or a placeholder if provenance cannot be determined.
+
+    Wrapped so a report is never lost to a failure in the one line that says
+    where it came from.
+    """
+    try:
+        from tradingagents.provenance import code_revision
+
+        return code_revision()
+    except Exception as exc:  # noqa: BLE001 — provenance must not block a save
+        logger.warning("Could not determine the code revision: %s", exc)
+        return "unknown"
+
+
 def _html_enabled(explicit: bool | None) -> bool:
     """Resolve the HTML setting: explicit argument wins, else live config."""
     if explicit is not None:
@@ -228,8 +243,14 @@ def _write_markdown_tree(final_state: dict, ticker: str, save_path) -> Path:
             exc,
         )
 
-    # Write consolidated report
-    header = f"# Trading Analysis Report: {ticker}\n\nGenerated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+    # Write consolidated report. The revision rides on the Generated line so
+    # _split_own_header carries it into the HTML subtitle too, and so a saved
+    # report always says which code produced it.
+    header = (
+        f"# Trading Analysis Report: {ticker}\n\n"
+        f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        f" · code {_code_revision()}\n\n"
+    )
     report = header
     if warning_block:
         report += f"{warning_block}\n\n"
