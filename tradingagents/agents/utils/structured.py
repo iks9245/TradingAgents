@@ -90,6 +90,10 @@ def _with_correction(prompt: Any, exc: BaseException) -> Any:
     return prompt
 
 
+# Callers detect a fallback by looking for this in the returned text.
+UNVALIDATED_MARKER = "**Unvalidated output.**"
+
+
 def _mark_unvalidated(text: str, agent_name: str, bypassed_checks: str, reason: str) -> str:
     """Prefix free-text output with a notice that no structured checks ran.
 
@@ -106,7 +110,7 @@ def _mark_unvalidated(text: str, agent_name: str, bypassed_checks: str, reason: 
     if len(condensed) > 200:
         condensed = condensed[:197] + "..."
     return (
-        f"> ⚠️ **Unvalidated output.** {agent_name}'s structured proposal could not be "
+        f"> ⚠️ {UNVALIDATED_MARKER} {agent_name}'s structured proposal could not be "
         f"produced, so this section is free-form text that bypassed {checks}. "
         f"Treat its levels and internal consistency as unchecked.\n"
         f">\n"

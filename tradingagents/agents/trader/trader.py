@@ -12,8 +12,10 @@ from tradingagents.agents.utils.agent_utils import (
     get_instrument_context_from_state,
     get_language_instruction,
 )
+from tradingagents.agents.utils.rating import parse_trader_action
 from tradingagents.agents.utils.structured import (
     NO_EXTERNAL_TOOLS,
+    UNVALIDATED_MARKER,
     bind_structured,
     invoke_structured_or_freetext,
 )
@@ -21,6 +23,31 @@ from tradingagents.dataflows.market_data_validator import (
     get_trade_reference_levels,
     render_trade_reference_block,
 )
+
+
+def _restore_transaction_marker(plan: str) -> str:
+    """Re-append the FINAL TRANSACTION PROPOSAL line lost to a free-text fallback.
+
+    The line is emitted by ``render_trader_proposal``, which does not run when
+    the structured path falls back — so the 2026-08-07 INTC report carried no
+    transaction marker at all. It is the convention every agent prompt refers to
+    as the stop signal, and external tooling greps for it.
+
+    The action is only restored when the prose labels it unambiguously. Where it
+    does not, the gap is stated rather than filled: a guessed direction sitting
+    under this marker would read exactly like a validated one.
+    """
+    if not isinstance(plan, str) or UNVALIDATED_MARKER not in plan:
+        return plan
+    if "FINAL TRANSACTION PROPOSAL" in plan:
+        return plan
+    action = parse_trader_action(plan)
+    if action is None:
+        return plan + (
+            "\n\nFINAL TRANSACTION PROPOSAL: **UNDETERMINED** — the fallback text "
+            "does not state one action unambiguously, so none was inferred."
+        )
+    return plan + f"\n\nFINAL TRANSACTION PROPOSAL: **{action.upper()}**"
 
 
 def create_trader(llm):
@@ -78,6 +105,8 @@ def create_trader(llm):
                 "and the computed ATR distance check"
             ),
         )
+
+        trader_plan = _restore_transaction_marker(trader_plan)
 
         return {
             "messages": [AIMessage(content=trader_plan)],

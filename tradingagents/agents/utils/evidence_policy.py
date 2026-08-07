@@ -46,6 +46,30 @@ contradicts the fundamentals or market data, say so explicitly rather than
 picking one.
 """.strip()
 
+# A figure's scope is part of the figure. Intel's 10-Q reported server-product
+# ASP up 48% year on year, driven mainly by a richer product mix. That reached a
+# shipped report as "Intel CPU prices up 48%", and from there as evidence of
+# pricing power across the whole CPU business — a claim the source does not
+# make. Nothing was misquoted: the number survived and its scope did not.
+SCOPE_DISCIPLINE = """
+**Scope discipline.** A quantitative claim carries the boundary it was measured
+within, and that boundary travels with the number. When you relay a figure, keep:
+
+- **Which part of the business** it covers — a segment, a product line, a region.
+  "Server product ASP" is not "CPU prices"; a data-centre figure is not a company
+  figure.
+- **What drove it**, when the source says. A price rise driven by a shift toward
+  higher-end products is a mix effect, not a price increase to customers, and the
+  two support different conclusions about pricing power.
+- **The comparison basis** — year on year, quarter on quarter, sequential.
+
+Widening a figure's scope is not summarising, it is a different and stronger
+claim than the source made. If you cannot state the boundary, say the figure is
+scoped to something you could not determine rather than dropping the qualifier.
+Never generalise from a segment to the whole company, and never restate a
+mix-driven change as a pricing action.
+""".strip()
+
 # For every agent downstream of the sentiment analyst.
 EVIDENCE_DISCIPLINE = f"""
 **Evidence discipline.** The reports you were given mix three tiers of evidence,
@@ -70,5 +94,5 @@ no matter how many times it has been repeated in the debate history.
 
 
 def get_evidence_discipline_instruction() -> str:
-    """Return the downstream evidence-tier rule, prefixed for prompt assembly."""
-    return "\n\n" + EVIDENCE_DISCIPLINE
+    """Return the downstream evidence-tier and scope rules, ready for prompt assembly."""
+    return "\n\n" + EVIDENCE_DISCIPLINE + "\n\n" + SCOPE_DISCIPLINE
