@@ -263,6 +263,21 @@ _BINDER_RE = re.compile(
 _MAX_BIND_CHARS = 24
 
 
+# An indicator's period sits in brackets right after its name: "ATR (14)",
+# "RSI (14)", "MACD (12, 26, 9)". Those are parameters, and reading 14 as an ATR
+# of 14 dollars conflicts it with the real 8.09. A value in brackets carries a
+# decimal or a currency mark ("SMA ($110.60)"), so requiring bare integers keeps
+# the two apart; a genuinely round value is skipped rather than misread, which
+# loses a reading instead of inventing a conflict.
+_PARAMETER_GROUP_RE = re.compile(r"^\s*\(\s*\d{1,3}(?:\s*,\s*\d{1,3})*\s*\)")
+
+
+def _skip_parameter_group(nearby: str) -> str:
+    """Drop a leading indicator-period group so the value after it is found."""
+    match = _PARAMETER_GROUP_RE.match(nearby)
+    return nearby[match.end() :] if match else nearby
+
+
 def _is_bound_to_label(gap: str) -> bool:
     """True when only binder text separates a metric's label from a number."""
     return len(gap) <= _MAX_BIND_CHARS and _BINDER_RE.match(gap) is not None
@@ -282,19 +297,31 @@ def _is_part_of_a_metric_name(text: str) -> bool:
     )
 
 
-def _is_ambiguous_pair(nearby: str, number_match: re.Match) -> bool:
-    """True when the number is one side of a slash-joined pair of numbers.
+# Two numbers joined by a slash or by "vs" are a pair whose sides cannot be told
+# apart positionally.
+_PAIR_JOINERS = (r"/", r"vs\.?", r"versus")
+_PAIR_AFTER_RE = re.compile(rf"^(?:{'|'.join(_PAIR_JOINERS)})\s*", re.IGNORECASE)
+_PAIR_BEFORE_RE = re.compile(rf"(?:{'|'.join(_PAIR_JOINERS)})\s*$", re.IGNORECASE)
 
-    A report that writes "50日/200日均價 | 512.95/313.16" packs two metrics into
-    one cell. Positional extraction cannot say which value is which, so the
-    honest move is to use neither rather than to guess and report a phantom
-    conflict.
+
+def _is_ambiguous_pair(nearby: str, number_match: re.Match) -> bool:
+    """True when the number is one side of a joined pair of numbers.
+
+    "50日/200日均價 | 512.95/313.16" packs two metrics into one cell, and
+    "50-day SMA ($99.43 vs $110.60)" compares the price against the average —
+    the number nearest the label is the *comparand*, not the metric. Positional
+    extraction cannot say which side is which, so the honest move is to use
+    neither rather than guess and report a phantom conflict.
     """
     before = nearby[: number_match.start()].rstrip()
     after = nearby[number_match.end() :].lstrip()
-    if before.endswith("/"):
+    if _PAIR_BEFORE_RE.search(before):
         return True
-    return after.startswith("/") and _NUMBER_RE.match(after[1:].lstrip()) is not None
+    joined = _PAIR_AFTER_RE.match(after)
+    if joined is None:
+        return False
+    remainder = after[joined.end() :].lstrip("$¥€£ ")
+    return _NUMBER_RE.match(remainder) is not None
 
 
 def _metric_values(
@@ -313,6 +340,7 @@ def _metric_values(
                 # Reading across a newline made "…在50日均线附近\n2. 高波动性…"
                 # contribute the list marker 2 as a 50-day average.
                 nearby = markdown[match.end() : match.end() + 40].split("\n", 1)[0]
+                nearby = _skip_parameter_group(nearby)
                 number_match = _NUMBER_RE.search(nearby)
                 if number_match is None:
                     continue
@@ -339,7 +367,7 @@ def _metric_values(
                 marker = marker_match.group(1) if marker_match else None
                 prefix = nearby[: number_match.start()]
                 approximate = bool(
-                    re.search(r"約|约|\b(?:about|approximately|approx\.?|around)\b|~", prefix, re.IGNORECASE)
+                    re.search(r"約|约|\b(?:about|approximately|approx\.?|around|circa|ca\.)\b|[~≈∼]", prefix, re.IGNORECASE)
                 )
                 values[metric].append(
                     _MetricValue(parsed, number_match.group(1), marker, approximate)

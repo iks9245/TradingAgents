@@ -233,3 +233,56 @@ class TestCrossLabelConfusion:
             "| Q2 | 7.01B | 4.45B |\n| Q1 | 1.10B | 0.80B |\n| Q4 | 4.29B | 0.12B |\n"
         )
         assert [f for f in lint_report(series) if f.kind == "conflict"] == []
+
+
+@pytest.mark.unit
+class TestValueExtractionPrecisionIII:
+    """Third round, from the 2026-08-07 INTC report.
+
+    Both warnings it produced were false, from three unrelated causes: a
+    comparison read as a reading, an indicator's period read as its value, and
+    an approximation sign the hedge detector did not know.
+    """
+
+    def test_a_comparison_is_not_a_reading(self):
+        # "50-day SMA ($99.43 vs $110.60)" compares the price against the
+        # average; the number nearest the label is the comparand, not the metric.
+        assert lint_report(
+            "Trading below 50-day SMA ($99.43 vs $110.60) indicating weakness.\n"
+            "| 50-day SMA | 110.59 |"
+        ) == []
+
+    def test_either_side_of_a_comparison_is_refused(self):
+        for text in (
+            "50-day SMA ($99.43 vs $110.60)",
+            "Price of $99.43 vs 50-day SMA of $110.60",
+        ):
+            assert [f for f in lint_report(text + "\n| 50-day SMA | 110.59 |")
+                    if f.kind == "conflict"] == []
+
+    def test_an_indicator_period_is_not_its_value(self):
+        # "ATR (14)" is a lookback parameter. Read as a value it conflicts with
+        # the real 8.09 sitting in the next table cell.
+        assert lint_report("| **ATR (14)** | **8.09** | elevated |\nATR is 8.09 today.") == []
+
+    def test_the_value_after_a_period_group_is_still_found(self):
+        # Skipping the parameter must not skip the reading that follows it.
+        findings = lint_report("| ATR (14) | 8.09 |\n| ATR (14) | 14.80 |")
+        assert any(f.kind == "conflict" for f in findings)
+        assert any("8.09" in f.detail and "14.8" in f.detail for f in findings)
+
+    def test_a_multi_parameter_group_is_skipped(self):
+        assert lint_report("MACD (12, 26, 9) reads -4.01.\nMACD (12, 26, 9) reads -4.01.") == []
+
+    def test_a_bracketed_value_is_still_read(self):
+        # "(110.60)" carries a decimal, so it is a value rather than a period.
+        findings = lint_report("50-day SMA ($110.60) resistance.\n| 50-day SMA | 99.43 |")
+        assert any(f.kind == "conflict" for f in findings)
+
+    def test_the_approximation_sign_marks_a_hedge(self):
+        # "ATR ≈8" is the writer rounding, not a second measurement.
+        assert lint_report("ATR is 8.09.\nUse the volatility (ATR ≈8) to size positions.") == []
+
+    @pytest.mark.parametrize("hedge", ["≈8", "~8", "about 8", "circa 8", "約 8"])
+    def test_every_hedge_form_is_recognised(self, hedge):
+        assert lint_report(f"ATR is 8.09 today.\nATR {hedge} roughly.") == []
