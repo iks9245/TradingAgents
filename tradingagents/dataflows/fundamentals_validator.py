@@ -173,6 +173,26 @@ def _latest_close(symbol: str, curr_date: str) -> float | None:
     return None if pd.isna(close) else close
 
 
+# Free cash flow has no single definition, and the gap between them is not a
+# rounding detail. Intel's 2026 Q2 simplified FCF is +4,450M while the company's
+# own adjusted figure is -8,419M, because Intel's definition also carries partner
+# contributions, government incentives and finance-lease payments. A report that
+# shows only the positive number invites the conclusion that the fabs are
+# self-funding. The vendor does not publish the company's definition, so the
+# honest move is to name ours precisely and say the other exists.
+_FCF_DEFINITION_NOTE = (
+    "> **What \"free cash flow\" means here.** Every FCF figure above is the "
+    "simplified definition: operating cash flow minus reported cash capital "
+    "expenditure. A company's own \"adjusted free cash flow\" often differs "
+    "materially — it may also deduct finance-lease payments and add partner "
+    "contributions or government incentives, and the two can carry opposite "
+    "signs in the same quarter. That figure comes from the filings and is not "
+    "available here. Call this one simplified free cash flow, and do not present "
+    "it as the company's own measure or as evidence that capital spending is "
+    "self-funded."
+)
+
+
 def _append_income_sections(lines: list[str], annual: pd.DataFrame, currency: str) -> pd.Series | None:
     revenue = _row(annual, "Total Revenue", "Operating Revenue")
     gross_profit = _row(annual, "Gross Profit")
@@ -365,6 +385,112 @@ _VENDOR_RATIOS: tuple[tuple[str, str, str], ...] = (
 _RATIO_MATCH_TOLERANCE_PP = 0.25
 
 
+def _margin_pct(numerator: float | None, denominator: float | None) -> float | None:
+    ratio = safe_ratio(numerator, denominator)
+    return None if ratio is None else ratio * 100
+
+
+def _append_quarterly_income_sections(
+    lines: list[str], quarterly: pd.DataFrame, currency: str
+) -> None:
+    """Quarterly margins and their period-on-period change, in percentage points.
+
+    Margins were only ever published annually here, so a quarter-on-quarter move
+    had to be worked out in the analyst's head — and was: a shipped report called
+    Intel's Q2 gross margin "up 2.3 percentage points" when 39.38% to 40.36% is
+    up 0.98. Printing the change with its operands leaves nothing to derive.
+
+    The distinction between points and percent is stated because it is the other
+    half of the same mistake: a move from 39.38% to 40.36% is +0.98 points, and
+    separately +2.5% in relative terms. Neither is 2.3.
+    """
+    parts = _income_components(quarterly)
+    periods = _periods(parts["revenue"], parts["gross_profit"], limit=5)
+    if len(periods) < 1:
+        return
+
+    lines += [
+        "",
+        "### Quarterly income statement",
+        "",
+        f"Units: millions of {currency}, except per-share EPS.",
+        "",
+        "| Quarter end | Revenue | Gross profit | Operating income | Net income | Diluted EPS |",
+        "|---|---:|---:|---:|---:|---:|",
+    ]
+    for period in periods:
+        lines.append(
+            f"| {period:%Y-%m-%d} | {_millions(_value(parts['revenue'], period))} | "
+            f"{_millions(_value(parts['gross_profit'], period))} | "
+            f"{_millions(_value(parts['operating_income'], period))} | "
+            f"{_millions(_value(parts['net_income'], period))} | "
+            f"{_eps(_value(parts['diluted_eps'], period))} |"
+        )
+
+    measures = (
+        ("Gross margin", "gross_profit"),
+        ("Operating margin", "operating_income"),
+        ("Net margin", "net_income"),
+    )
+    margins: dict[pd.Timestamp, dict[str, float | None]] = {}
+    margin_rows: list[str] = []
+    for period in periods:
+        revenue = _value(parts["revenue"], period)
+        cells, row = [], {}
+        for label, key in measures:
+            amount = _value(parts[key], period)
+            value = _margin_pct(amount, revenue)
+            row[label] = value
+            cells.append(
+                "N/A" if value is None
+                else f"{value:.2f}%  ({_millions(amount)} / {_millions(revenue)})"
+            )
+        margins[period] = row
+        if any(cell != "N/A" for cell in cells):
+            margin_rows.append(f"| {period:%Y-%m-%d} | " + " | ".join(cells) + " |")
+    if margin_rows:
+        lines += [
+            "",
+            "### Quarterly margins",
+            "",
+            f"Units in arithmetic: millions of {currency}.",
+            "",
+            "| Quarter end | Gross margin | Operating margin | Net margin |",
+            "|---|---:|---:|---:|",
+        ] + margin_rows
+
+    change_rows: list[str] = []
+    for index, period in enumerate(periods[:-1]):
+        older = periods[index + 1]
+        cells = []
+        for label, _key in measures:
+            new, prior = margins[period].get(label), margins[older].get(label)
+            if new is None or prior is None:
+                cells.append("N/A")
+                continue
+            cells.append(f"{new - prior:+.2f} pp  ({new:.2f}% - {prior:.2f}%)")
+        if any(cell != "N/A" for cell in cells):
+            change_rows.append(
+                f"| {period:%Y-%m-%d} vs {older:%Y-%m-%d} | " + " | ".join(cells) + " |"
+            )
+    if change_rows:
+        lines += [
+            "",
+            "### Quarter-on-quarter margin change",
+            "",
+            "| Quarters compared | Gross margin | Operating margin | Net margin |",
+            "|---|---:|---:|---:|",
+        ] + change_rows + [
+            "",
+            "> Quote these changes in **percentage points**, with the sign and the two "
+            "margins they came from. A margin moving from 39.38% to 40.36% rose 0.98 "
+            "points — that is a different statement from \"rose 2.5%\" (the relative "
+            "change) and neither of them is a number you should round up to a rougher "
+            "one. Do not compare a quarterly margin against an annual or TTM margin: "
+            "those are different windows and the difference is not a trend.",
+        ]
+
+
 def _append_vendor_ratio_crosscheck(
     lines: list[str], info: dict, quarterly: pd.DataFrame
 ) -> None:
@@ -551,7 +677,7 @@ def _append_cash_flow_section(lines: list[str], annual: pd.DataFrame, quarterly:
     periods = _periods(annual_ocf, annual_capex, annual_fcf)
     if periods:
         lines += ["", "### Cash flow — annual", "", f"Capex is shown as spend using abs(yfinance capex), in millions of {currency}.", "",
-                  "| Fiscal year end | Operating cash flow | Capex spend | Free cash flow | OCF YoY | Capex YoY | FCF YoY |",
+                  "| Fiscal year end | Operating cash flow | Capex spend | Simplified FCF (OCF - capex) | OCF YoY | Capex YoY | FCF YoY |",
                   "|---|---:|---:|---:|---:|---:|---:|"]
         for index, period in enumerate(periods):
             ocf, capex, fcf = _value(annual_ocf, period), _value(annual_capex, period), _value(annual_fcf, period)
@@ -579,7 +705,7 @@ def _append_cash_flow_section(lines: list[str], annual: pd.DataFrame, quarterly:
         if comparison is not None:
             lines += ["", f"### Cash flow — quarterly YoY ({latest:%Y-%m-%d} vs {comparison:%Y-%m-%d})", "",
                       "| Metric | Most recent quarter | Same quarter one year earlier | YoY |", "|---|---:|---:|---:|"]
-            for label, values, is_capex in (("Operating cash flow", q_ocf, False), ("Capex spend", q_capex, True), ("Free cash flow", q_fcf, False)):
+            for label, values, is_capex in (("Operating cash flow", q_ocf, False), ("Capex spend", q_capex, True), ("Simplified FCF (OCF - capex)", q_fcf, False)):
                 latest_value, old_value = _value(values, latest), _value(values, comparison)
                 if is_capex:
                     latest_value = None if latest_value is None else abs(latest_value)
@@ -603,7 +729,7 @@ def _append_cash_flow_section(lines: list[str], annual: pd.DataFrame, quarterly:
         capex_spend = None if capex is None else abs(capex)
         labelled.append(
             f"- {period:%Y-%m-%d}: OCF {_millions(ocf)} | capex {_millions(capex_spend)} "
-            f"| FCF {_millions(fcf)}"
+            f"| simplified FCF (OCF - capex) {_millions(fcf)}"
         )
     if labelled:
         lines += [
@@ -621,6 +747,7 @@ def _append_cash_flow_section(lines: list[str], annual: pd.DataFrame, quarterly:
 
     if periods or quarter_periods:
         lines += ["", "> Capex and free-cash-flow growth rates differ between the annual and quarterly views. State which one you are quoting, with the period. Do not describe a +83.5% quarterly change as \"doubled\"."]
+        lines += ["", _FCF_DEFINITION_NOTE]
 
 
 def _append_price_statistics_section(lines: list[str], symbol: str, curr_date: str, currency: str) -> None:
@@ -773,6 +900,7 @@ def build_verified_fundamentals_snapshot(
     ]
     currency = _financial_currency(ticker)
     annual_eps = _append_income_sections(lines, annual_income, currency)
+    _append_quarterly_income_sections(lines, quarterly_income, currency)
     _append_operating_income_crosscheck(lines, quarterly_income, annual_income, currency)
     _append_vendor_ratio_crosscheck(lines, _vendor_info(ticker), quarterly_income)
     _append_sign_label_check(lines, quarterly_income, currency)

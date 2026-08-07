@@ -303,3 +303,59 @@ class TestVendorRatioAndSignChecks:
         assert "labelled series" in snapshot
         assert "OCF" in snapshot and "FCF" in snapshot
         assert "Never restate one as the other" in snapshot
+
+
+@pytest.mark.unit
+class TestQuarterlyMarginsAndFcfDefinition:
+    """Margin deltas in points, and an FCF figure that names its definition."""
+
+    def _snapshot(self, monkeypatch) -> str:
+        fake = _ticker()
+        # Intel's real Q1/Q2 2026 figures: the QoQ gross-margin move a shipped
+        # report called "+2.3 percentage points" is actually +0.98.
+        fake.quarterly_income_stmt = _frame({
+            "Total Revenue": [16_128e6, 13_577e6],
+            "Gross Profit": [6_509e6, 5_347e6],
+            "Operating Income": [1_966e6, 934e6],
+            "Net Income": [-11_033e6, -3_728e6],
+        }, ["2026-06-30", "2026-03-31"])
+        fake.income_stmt = pd.DataFrame()
+        monkeypatch.setattr(validator.yf, "Ticker", lambda symbol: fake)
+        monkeypatch.setattr(validator, "load_ohlcv", lambda s, d: pd.DataFrame())
+        return validator.build_verified_fundamentals_snapshot("INTC", "2026-06-30")
+
+    def test_quarterly_margins_are_computed_with_their_operands(self, monkeypatch):
+        snapshot = self._snapshot(monkeypatch)
+        assert "40.36%  (6,509 / 16,128)" in snapshot
+        assert "39.38%  (5,347 / 13,577)" in snapshot
+
+    def test_the_qoq_change_is_stated_in_points_not_guessed(self, monkeypatch):
+        snapshot = self._snapshot(monkeypatch)
+        assert "+0.98 pp  (40.36% - 39.38%)" in snapshot
+        # The figure the report invented must not appear.
+        assert "2.3 pp" not in snapshot
+
+    def test_points_and_percent_are_distinguished(self, monkeypatch):
+        snapshot = self._snapshot(monkeypatch)
+        assert "percentage points" in snapshot
+        assert "the relative change" in snapshot
+        # ...and quarterly margins must not be compared against other windows.
+        assert "Do not compare a quarterly margin against an annual or TTM margin" in snapshot
+
+    def test_free_cash_flow_names_its_definition(self, monkeypatch):
+        fake = _ticker()
+        monkeypatch.setattr(validator.yf, "Ticker", lambda symbol: fake)
+        monkeypatch.setattr(validator, "load_ohlcv", lambda s, d: pd.DataFrame())
+        snapshot = validator.build_verified_fundamentals_snapshot("AMD", "2025-12-31")
+        assert "Simplified FCF (OCF - capex)" in snapshot
+        assert "simplified FCF (OCF - capex)" in snapshot  # the labelled series too
+
+    def test_the_company_defined_measure_is_flagged_as_absent(self, monkeypatch):
+        fake = _ticker()
+        monkeypatch.setattr(validator.yf, "Ticker", lambda symbol: fake)
+        monkeypatch.setattr(validator, "load_ohlcv", lambda s, d: pd.DataFrame())
+        snapshot = validator.build_verified_fundamentals_snapshot("AMD", "2025-12-31")
+        assert "adjusted free cash flow" in snapshot
+        assert "opposite" in snapshot
+        # The specific over-claim this exists to prevent.
+        assert "self-funded" in snapshot
