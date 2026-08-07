@@ -171,6 +171,41 @@ python -m cli.main     # alternative: run directly from source
 ```
 You will see a screen where you can select your desired tickers, analysis date, LLM provider, research depth, and more.
 
+### Non-interactive runs
+
+`--non-interactive` (or `-y`) with a ticker runs the whole analysis without a
+single prompt. The date defaults to today, all analysts valid for the detected
+asset type are selected, every other setting falls back to its configured
+default, and the report is saved under `reports/<TICKER>_<YYYYMMDD>_<HHMMSS>` —
+the layout `python -m tradingagents.run_index` reads.
+
+```bash
+export OPENAI_API_KEY=...
+tradingagents analyze --non-interactive --ticker INTC
+```
+
+Only the provider's API key is genuinely required; a missing one exits 2 rather
+than prompting. The usual `TRADINGAGENTS_*` variables still override the
+defaults when you want something other than them:
+
+```bash
+export TRADINGAGENTS_LLM_PROVIDER=openai
+export TRADINGAGENTS_DEEP_THINK_LLM=gpt-5.5
+export TRADINGAGENTS_OUTPUT_LANGUAGE=English
+
+tradingagents analyze -y --ticker 0700.HK --analysts market,news --save-to /tmp/run
+```
+
+Use `--date`, `--analysts`, `--save-to PATH`, `--no-save`, or `--display` to
+override the scripted defaults. The last line of stdout on success is the
+resolved report directory, so a calling script can find the output without
+guessing.
+
+Exit codes: `0` completed, `1` the analysis or the save failed, `2` a usage or
+configuration problem (missing `--ticker`, bad date, unknown analyst, absent API
+key). Supplying `--ticker`/`--date`/`--analysts` *without* `--non-interactive`
+just pre-fills those steps and leaves the rest interactive.
+
 ### Markets and tickers
 
 TradingAgents works with any market Yahoo Finance covers, using the exchange-suffixed ticker. Company identity and the alpha benchmark resolve automatically per market.

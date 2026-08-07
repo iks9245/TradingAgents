@@ -1,10 +1,12 @@
 import datetime
 import os
+import re
 import sys
 import time
 from collections import deque
 from functools import wraps
 from pathlib import Path
+from typing import Annotated
 
 import typer
 from rich import box
@@ -20,6 +22,7 @@ from rich.table import Table
 from rich.text import Text
 
 from cli.announcements import display_announcements, fetch_announcements
+from cli.models import AnalystType
 from cli.stats_handler import StatsCallbackHandler
 from cli.utils import (
     ask_anthropic_effort,
@@ -32,7 +35,10 @@ from cli.utils import (
     confirm_ollama_endpoint,
     detect_asset_type,
     ensure_api_key,
+    filter_analysts_for_asset_type,
     get_ticker,
+    is_valid_ticker_input,
+    normalize_ticker_symbol,
     prompt_openai_compatible_url,
     resolve_backend_url,
     select_analysts,
@@ -49,6 +55,8 @@ from tradingagents.graph.analyst_execution import (
     sync_analyst_tracker_from_chunk,
 )
 from tradingagents.graph.trading_graph import TradingAgentsGraph
+from tradingagents.llm_clients.api_key_env import get_api_key_env
+from tradingagents.llm_clients.openai_client import OPENAI_COMPATIBLE_PROVIDERS
 from tradingagents.reporting import ReportPaths, write_report_bundle
 
 console = Console()
@@ -492,36 +500,68 @@ def update_display(layout, spinner_text=None, stats_handler=None, start_time=Non
     layout["footer"].update(Panel(stats_table, border_style="grey50"))
 
 
-def get_user_selections():
+def _usage_error(message: str) -> None:
+    typer.echo(f"Error: {message}", err=True)
+    raise typer.Exit(code=2)
+
+
+def _api_key_is_required(provider: str) -> bool:
+    env_var = get_api_key_env(provider)
+    if env_var is None:
+        return False
+    spec = OPENAI_COMPATIBLE_PROVIDERS.get(provider.lower())
+    return spec is None or not spec.key_optional
+
+
+def _source_label(non_interactive: bool) -> str:
+    """Name where a skipped step's value came from.
+
+    Under --non-interactive a step is skipped whether or not its variable was
+    exported, so the old unconditional "from environment" would state something
+    untrue for exactly the runs a person is least able to check.
+    """
+    return "from configuration" if non_interactive else "from environment"
+
+
+def get_user_selections(
+    *,
+    ticker: str | None = None,
+    analysis_date: str | None = None,
+    analysts: str | None = None,
+    non_interactive: bool = False,
+):
     """Get all user selections before starting the analysis display."""
-    # Display ASCII art welcome message
-    with open(Path(__file__).parent / "static" / "welcome.txt", encoding="utf-8") as f:
-        welcome_ascii = f.read()
+    if not non_interactive:
+        # Display ASCII art welcome message
+        with open(
+            Path(__file__).parent / "static" / "welcome.txt", encoding="utf-8"
+        ) as f:
+            welcome_ascii = f.read()
 
-    # Create welcome box content
-    welcome_content = f"{welcome_ascii}\n"
-    welcome_content += "[bold green]TradingAgents: Multi-Agents LLM Financial Trading Framework - CLI[/bold green]\n\n"
-    welcome_content += "[bold]Workflow Steps:[/bold]\n"
-    welcome_content += "I. Analyst Team → II. Research Team → III. Trader → IV. Risk Management → V. Portfolio Management\n\n"
-    welcome_content += (
-        "[dim]Built by [Tauric Research](https://github.com/TauricResearch)[/dim]"
-    )
+        # Create welcome box content
+        welcome_content = f"{welcome_ascii}\n"
+        welcome_content += "[bold green]TradingAgents: Multi-Agents LLM Financial Trading Framework - CLI[/bold green]\n\n"
+        welcome_content += "[bold]Workflow Steps:[/bold]\n"
+        welcome_content += "I. Analyst Team → II. Research Team → III. Trader → IV. Risk Management → V. Portfolio Management\n\n"
+        welcome_content += (
+            "[dim]Built by [Tauric Research](https://github.com/TauricResearch)[/dim]"
+        )
 
-    # Create and center the welcome box
-    welcome_box = Panel(
-        welcome_content,
-        border_style="green",
-        padding=(1, 2),
-        title="Welcome to TradingAgents",
-        subtitle="Multi-Agents LLM Financial Trading Framework",
-    )
-    console.print(Align.center(welcome_box))
-    console.print()
-    console.print()  # Add vertical space before announcements
+        # Create and center the welcome box
+        welcome_box = Panel(
+            welcome_content,
+            border_style="green",
+            padding=(1, 2),
+            title="Welcome to TradingAgents",
+            subtitle="Multi-Agents LLM Financial Trading Framework",
+        )
+        console.print(Align.center(welcome_box))
+        console.print()
+        console.print()  # Add vertical space before announcements
 
-    # Fetch and display announcements (silent on failure)
-    announcements = fetch_announcements()
-    display_announcements(console, announcements)
+        # Fetch and display announcements (silent on failure)
+        announcements = fetch_announcements()
+        display_announcements(console, announcements)
 
     # Create a boxed questionnaire for each step
     def create_question_box(title, prompt, default=None):
@@ -540,20 +580,29 @@ def get_user_selections():
         """
         if os.environ.get(env_var):
             value = DEFAULT_CONFIG[config_key]
-            console.print(f"[green]✓ {label} from environment:[/green] {value}")
+            console.print(f"[green]✓ {label} {_source_label(non_interactive)}:[/green] {value}")
             return value
         console.print(create_question_box(box_title, box_body))
         return prompt_fn()
 
     # Step 1: Ticker symbol
-    console.print(
-        create_question_box(
-            "Step 1: Ticker Symbol",
-            "Enter the ticker, with exchange suffix when needed (e.g. SPY, 0700.HK, BTC-USD)",
-            "SPY",
+    if ticker is None:
+        if non_interactive:
+            _usage_error("--ticker is required with --non-interactive")
+        console.print(
+            create_question_box(
+                "Step 1: Ticker Symbol",
+                "Enter the ticker, with exchange suffix when needed (e.g. SPY, 0700.HK, BTC-USD)",
+                "SPY",
+            )
         )
-    )
-    selected_ticker = get_ticker()
+        selected_ticker = get_ticker()
+    else:
+        if not is_valid_ticker_input(ticker):
+            _usage_error(
+                "invalid --ticker; use a symbol such as AAPL, 0700.HK, or BTC-USD"
+            )
+        selected_ticker = normalize_ticker_symbol(ticker) if ticker.strip() else "SPY"
     asset_type = detect_asset_type(selected_ticker)
     # Only announce when it's not the default stock path, to avoid printing
     # "stock" on every run.
@@ -564,20 +613,36 @@ def get_user_selections():
 
     # Step 2: Analysis date
     default_date = datetime.datetime.now().strftime("%Y-%m-%d")
-    console.print(
-        create_question_box(
-            "Step 2: Analysis Date",
-            "Enter the analysis date (YYYY-MM-DD)",
-            default_date,
+    if analysis_date is None and non_interactive:
+        analysis_date = default_date
+    if analysis_date is None:
+        console.print(
+            create_question_box(
+                "Step 2: Analysis Date",
+                "Enter the analysis date (YYYY-MM-DD)",
+                default_date,
+            )
         )
-    )
-    analysis_date = get_analysis_date()
+        analysis_date = get_analysis_date()
+    else:
+        try:
+            analysis_date = validate_analysis_date(analysis_date)
+        except ValueError as exc:
+            _usage_error(str(exc))
 
     # Step 3: Output language (skipped when set via TRADINGAGENTS_OUTPUT_LANGUAGE)
-    if os.environ.get("TRADINGAGENTS_OUTPUT_LANGUAGE"):
+    #
+    # The remaining steps each skip their prompt when their env var is set. A
+    # scripted run has to skip them whether or not the caller exported anything,
+    # so --non-interactive is treated as "configured" throughout: every one of
+    # these keys carries a usable default on DEFAULT_CONFIG. Without this the
+    # step still reached for a prompt and died on the closed stdin with
+    # "Input is not a terminal", naming neither the step nor the env var.
+    if non_interactive or os.environ.get("TRADINGAGENTS_OUTPUT_LANGUAGE"):
         output_language = DEFAULT_CONFIG["output_language"]
         console.print(
-            f"[green]✓ Output language from environment:[/green] {output_language}"
+            f"[green]✓ Output language {_source_label(non_interactive)}:[/green] "
+            f"{output_language}"
         )
     else:
         console.print(
@@ -589,12 +654,43 @@ def get_user_selections():
         output_language = ask_output_language()
 
     # Step 4: Select analysts
-    console.print(
-        create_question_box(
-            "Step 4: Analysts Team", "Select your LLM analyst agents for the analysis"
+    if analysts is None and non_interactive:
+        selected_analysts = filter_analysts_for_asset_type(
+            list(AnalystType), asset_type
         )
-    )
-    selected_analysts = select_analysts(asset_type)
+    elif analysts is None:
+        console.print(
+            create_question_box(
+                "Step 4: Analysts Team",
+                "Select your LLM analyst agents for the analysis",
+            )
+        )
+        selected_analysts = select_analysts(asset_type)
+    else:
+        requested_names = [name.strip().lower() for name in analysts.split(",")]
+        valid_names = [analyst.value for analyst in AnalystType]
+        unknown_names = [name for name in requested_names if name not in valid_names]
+        if unknown_names:
+            _usage_error(
+                f"unknown analyst(s): {', '.join(unknown_names)}; "
+                f"valid analysts are: {', '.join(valid_names)}"
+            )
+        requested_analysts = [AnalystType(name) for name in requested_names]
+        selected_analysts = filter_analysts_for_asset_type(
+            requested_analysts, asset_type
+        )
+        dropped = [
+            analyst for analyst in requested_analysts if analyst not in selected_analysts
+        ]
+        if dropped:
+            console.print(
+                f"[yellow]Dropped analysts not valid for {asset_type.value}: "
+                f"{', '.join(analyst.value for analyst in dropped)}[/yellow]"
+            )
+        if not selected_analysts:
+            _usage_error(
+                f"no selected analysts are valid for asset type {asset_type.value}"
+            )
     console.print(
         f"[green]Selected analysts:[/green] {', '.join(analyst.value for analyst in selected_analysts)}"
     )
@@ -606,10 +702,10 @@ def get_user_selections():
     depth_from_env = bool(os.environ.get("TRADINGAGENTS_MAX_DEBATE_ROUNDS")) and bool(
         os.environ.get("TRADINGAGENTS_MAX_RISK_ROUNDS")
     )
-    if depth_from_env:
+    if non_interactive or depth_from_env:
         selected_research_depth = DEFAULT_CONFIG["max_debate_rounds"]
         console.print(
-            f"[green]✓ Research depth from environment:[/green] "
+            f"[green]✓ Research depth {_source_label(non_interactive)}:[/green] "
             f"{DEFAULT_CONFIG['max_debate_rounds']} debate / "
             f"{DEFAULT_CONFIG['max_risk_discuss_rounds']} risk rounds"
         )
@@ -625,16 +721,28 @@ def get_user_selections():
     # The backend URL comes from TRADINGAGENTS_LLM_BACKEND_URL when set,
     # otherwise the provider's default endpoint — the same value the menu
     # would have picked.
-    provider_from_env = bool(os.environ.get("TRADINGAGENTS_LLM_PROVIDER"))
+    provider_from_env = bool(os.environ.get("TRADINGAGENTS_LLM_PROVIDER")) or non_interactive
     if provider_from_env:
         selected_llm_provider = DEFAULT_CONFIG["llm_provider"].lower()
         backend_url = resolve_backend_url(
             selected_llm_provider, env_url=DEFAULT_CONFIG["backend_url"]
         )
-        console.print(f"[green]✓ LLM provider from environment:[/green] {selected_llm_provider}")
+        console.print(f"[green]✓ LLM provider {_source_label(non_interactive)}:[/green] "
+            f"{selected_llm_provider}")
         console.print(f"[green]✓ Backend URL:[/green] {backend_url}")
         # Still confirm/persist the API key so the run doesn't fail later.
-        ensure_api_key(selected_llm_provider)
+        api_key = ensure_api_key(
+            selected_llm_provider, non_interactive=non_interactive
+        )
+        if (
+            non_interactive
+            and api_key is None
+            and _api_key_is_required(selected_llm_provider)
+        ):
+            _usage_error(
+                f"{get_api_key_env(selected_llm_provider)} is required for "
+                f"provider {selected_llm_provider}"
+            )
     else:
         console.print(
             create_question_box(
@@ -672,14 +780,25 @@ def get_user_selections():
         # Confirm the provider's API key is present; prompt the user to paste
         # one and persist it to .env if it's missing, so the analysis run
         # doesn't fail later at the first API call.
-        ensure_api_key(selected_llm_provider)
+        api_key = ensure_api_key(
+            selected_llm_provider, non_interactive=non_interactive
+        )
+        if (
+            non_interactive
+            and api_key is None
+            and _api_key_is_required(selected_llm_provider)
+        ):
+            _usage_error(
+                f"{get_api_key_env(selected_llm_provider)} is required for "
+                f"provider {selected_llm_provider}"
+            )
 
     # Step 7: Thinking agents (skipped when either model is set via environment)
-    if os.environ.get("TRADINGAGENTS_QUICK_THINK_LLM") or os.environ.get("TRADINGAGENTS_DEEP_THINK_LLM"):
+    if non_interactive or os.environ.get("TRADINGAGENTS_QUICK_THINK_LLM") or os.environ.get("TRADINGAGENTS_DEEP_THINK_LLM"):
         selected_shallow_thinker = DEFAULT_CONFIG["quick_think_llm"]
         selected_deep_thinker = DEFAULT_CONFIG["deep_think_llm"]
         console.print(
-            f"[green]✓ Thinking agents from environment:[/green] "
+            f"[green]✓ Thinking agents {_source_label(non_interactive)}:[/green] "
             f"quick={selected_shallow_thinker}, deep={selected_deep_thinker}"
         )
     else:
@@ -741,6 +860,20 @@ def get_user_selections():
     }
 
 
+def validate_analysis_date(date_str: str) -> str:
+    """Validate the CLI analysis date and return its normalized text."""
+    date_str = date_str.strip()
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", date_str) is None:
+        raise ValueError("Invalid date format. Please use YYYY-MM-DD")
+    try:
+        analysis_date = datetime.datetime.strptime(date_str, "%Y-%m-%d")
+    except ValueError as exc:
+        raise ValueError("Invalid date format. Please use YYYY-MM-DD") from exc
+    if analysis_date.date() > datetime.datetime.now().date():
+        raise ValueError("Analysis date cannot be in the future")
+    return date_str
+
+
 def get_analysis_date():
     """Get the analysis date from user input."""
     while True:
@@ -748,16 +881,9 @@ def get_analysis_date():
             "", default=datetime.datetime.now().strftime("%Y-%m-%d")
         )
         try:
-            # Validate date format and ensure it's not in the future
-            analysis_date = datetime.datetime.strptime(date_str, "%Y-%m-%d")
-            if analysis_date.date() > datetime.datetime.now().date():
-                console.print("[red]Error: Analysis date cannot be in the future[/red]")
-                continue
-            return date_str
-        except ValueError:
-            console.print(
-                "[red]Error: Invalid date format. Please use YYYY-MM-DD[/red]"
-            )
+            return validate_analysis_date(date_str)
+        except ValueError as exc:
+            console.print(f"[red]Error: {exc}[/red]")
 
 
 def save_report_to_disk(final_state, ticker: str, save_path: Path) -> ReportPaths:
@@ -1011,9 +1137,25 @@ def _build_run_config(
     return config
 
 
-def run_analysis(checkpoint: bool | None = None, html: bool | None = None):
+def run_analysis(
+    *,
+    checkpoint: bool | None = None,
+    html: bool | None = None,
+    ticker: str | None = None,
+    date: str | None = None,
+    analysts: str | None = None,
+    save_to: Path | None = None,
+    save: bool = True,
+    non_interactive: bool = False,
+    display: bool = True,
+):
     # First get all user selections
-    selections = get_user_selections()
+    selections = get_user_selections(
+        ticker=ticker,
+        analysis_date=date,
+        analysts=analysts,
+        non_interactive=non_interactive,
+    )
 
     config = _build_run_config(selections, checkpoint, html)
 
@@ -1277,18 +1419,32 @@ def run_analysis(checkpoint: bool | None = None, html: bool | None = None):
     console.print("\n[bold cyan]Analysis Complete![/bold cyan]\n")
     console.print(f"[dim]{analyst_wall_time_tracker.format_summary()}[/dim]")
 
-    # Prompt to save report
-    save_choice = typer.prompt("Save report?", default="Y").strip().upper()
-    if save_choice in ("Y", "YES", ""):
+    # Prompt to save report only for an interactive run. Scripted runs save by
+    # default unless --no-save was supplied.
+    if non_interactive:
+        should_save = save
+    elif save:
+        save_choice = typer.prompt("Save report?", default="Y").strip().upper()
+        should_save = save_choice in ("Y", "YES", "")
+    else:
+        should_save = False
+
+    resolved_save_path = None
+    if should_save:
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         default_path = Path.cwd() / "reports" / f"{selections['ticker']}_{timestamp}"
-        save_path_str = typer.prompt(
-            "Save path (press Enter for default)",
-            default=str(default_path)
-        ).strip()
-        save_path = Path(save_path_str)
+        if save_to is not None:
+            save_path = save_to
+        elif non_interactive:
+            save_path = default_path
+        else:
+            save_path_str = typer.prompt(
+                "Save path (press Enter for default)", default=str(default_path)
+            ).strip()
+            save_path = Path(save_path_str)
         try:
             paths = save_report_to_disk(final_state, selections["ticker"], save_path)
+            resolved_save_path = save_path.resolve()
             console.print(f"\n[green]✓ Report saved to:[/green] {save_path.resolve()}")
             console.print(f"  [dim]Complete report:[/dim] {paths.markdown.name}")
             if paths.html:
@@ -1297,11 +1453,30 @@ def run_analysis(checkpoint: bool | None = None, html: bool | None = None):
                 console.print(f"  [dim]Open:[/dim] file://{paths.html.resolve()}")
         except Exception as e:
             console.print(f"[red]Error saving report: {e}[/red]")
+            # An interactive user reads that message and still has the report on
+            # screen. A scripted caller has neither: exiting 0 here would report
+            # success for a run whose only deliverable was never written, and
+            # the caller's next step is to go looking for a directory that does
+            # not exist.
+            if non_interactive:
+                raise typer.Exit(code=1) from None
 
-    # Prompt to display full report
-    display_choice = typer.prompt("\nDisplay full report on screen?", default="Y").strip().upper()
-    if display_choice in ("Y", "YES", ""):
+    # Prompt to display the full report only for an interactive run. Under
+    # --non-interactive, --display/--no-display is authoritative.
+    if non_interactive:
+        should_display = display
+    elif display:
+        display_choice = typer.prompt(
+            "\nDisplay full report on screen?", default="Y"
+        ).strip().upper()
+        should_display = display_choice in ("Y", "YES", "")
+    else:
+        should_display = False
+    if should_display:
         display_complete_report(final_state)
+
+    if resolved_save_path is not None:
+        typer.echo(str(resolved_save_path))
 
 
 @app.command()
@@ -1323,13 +1498,61 @@ def analyze(
         help="Write a browsable complete_report.html beside the saved markdown "
         "report. Omit to honor TRADINGAGENTS_REPORT_HTML (default: on).",
     ),
+    ticker: str | None = typer.Option(
+        None,
+        "--ticker",
+        help="Ticker symbol, e.g. INTC, 0700.HK, BTC-USD.",
+    ),
+    date: str | None = typer.Option(
+        None,
+        "--date",
+        help="Analysis date in YYYY-MM-DD format (default: today).",
+    ),
+    analysts: str | None = typer.Option(
+        None,
+        "--analysts",
+        help="Comma-separated: market,social,news,fundamentals.",
+    ),
+    save_to: Annotated[
+        Path | None,
+        typer.Option(
+            "--save-to",
+            help="Report directory (default: reports/<TICKER>_<timestamp>).",
+        ),
+    ] = None,
+    no_save: bool = typer.Option(
+        False,
+        "--no-save",
+        help="Do not write the report to disk.",
+    ),
+    non_interactive: bool = typer.Option(
+        False,
+        "--non-interactive",
+        "-y",
+        help="Never prompt; fail with a clear message instead.",
+    ),
+    display: bool | None = typer.Option(
+        None,
+        "--display/--no-display",
+        help="Display or suppress the full report at the end.",
+    ),
 ):
     if clear_checkpoints:
         from tradingagents.graph.checkpointer import clear_all_checkpoints
         n = clear_all_checkpoints(DEFAULT_CONFIG["data_cache_dir"])
         console.print(f"[yellow]Cleared {n} checkpoint(s).[/yellow]")
     try:
-        run_analysis(checkpoint=checkpoint, html=html)
+        run_analysis(
+            checkpoint=checkpoint,
+            html=html,
+            ticker=ticker,
+            date=date,
+            analysts=analysts,
+            save_to=save_to,
+            save=not no_save,
+            non_interactive=non_interactive,
+            display=display if display is not None else not non_interactive,
+        )
     except _NO_CONSOLE_ERRORS:
         # A terminal with no console buffer cannot host the interactive prompts.
         # Emit one actionable line on stderr instead of a prompt_toolkit
@@ -1340,6 +1563,14 @@ def analyze(
             "rather than a piped or embedded terminal.",
             err=True,
         )
+        raise typer.Exit(code=1) from None
+    except typer.Exit:
+        raise
+    except Exception as exc:
+        if not non_interactive:
+            raise
+        error_text = str(exc).replace("\r", " ").replace("\n", " ")
+        typer.echo(f"Error: analysis failed: {error_text}", err=True)
         raise typer.Exit(code=1) from None
 
 
