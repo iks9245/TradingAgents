@@ -17,6 +17,10 @@ one carrying rule for every agent that reads its output.
 
 from __future__ import annotations
 
+# Free-text fallbacks carry this marker so on-disk consumers can detect which
+# sections bypassed structured validation without importing the LLM stack.
+UNVALIDATED_MARKER = "**Unvalidated output.**"
+
 # Marker the sentiment analyst wraps around numbers that came from social posts.
 UNVERIFIED_MARKER = "[UNVERIFIED — social post]"
 
