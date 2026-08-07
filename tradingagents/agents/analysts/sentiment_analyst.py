@@ -114,6 +114,10 @@ def create_sentiment_analyst(llm):
             formatted_messages,
             render_sentiment_report,
             "Sentiment Analyst",
+            bypassed_checks=(
+                "the sentiment band/score consistency check and the structured list of "
+                "unverified social-media claims"
+            ),
         )
 
         return {
