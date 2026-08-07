@@ -314,7 +314,10 @@ _FUNDAMENTAL_FIELDS: tuple[tuple[str, str, str], ...] = (
     ("Debt to Equity (MRQ)", "debtToEquity", "percent_and_multiple"),
     ("Current Ratio (MRQ)", "currentRatio", "multiple"),
     ("Book Value per Share (MRQ)", "bookValue", "price"),
-    ("Free Cash Flow (TTM)", "freeCashflow", "money"),
+    # Vendor FCF is operating cash flow minus capex; a company's own
+    # "adjusted free cash flow" can differ by billions and carry the
+    # opposite sign. See the snapshot's cash-flow note.
+    ("Free Cash Flow (vendor: OCF - capex)", "freeCashflow", "money"),
 )
 
 # Why the price statistics are gone: yfinance's ``fiftyDayAverage`` and
