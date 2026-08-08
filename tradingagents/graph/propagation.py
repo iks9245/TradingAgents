@@ -22,6 +22,8 @@ class Propagator:
         asset_type: str = "stock",
         past_context: str = "",
         instrument_context: str = "",
+        verified_market_block: str = "",
+        verified_fundamentals_block: str = "",
     ) -> dict[str, Any]:
         """Create the initial state for the agent graph.
 
@@ -30,6 +32,11 @@ class Propagator:
         ``TradingAgentsGraph.resolve_instrument_context``). When empty, agents
         fall back to ticker-only context via
         ``get_instrument_context_from_state``.
+
+        The two ``verified_*_block`` strings are the snapshots the agents
+        downstream of the analysts check report claims against (see
+        ``TradingAgentsGraph.resolve_verified_evidence``). Left empty, each
+        consumer resolves them on demand rather than reasoning without them.
         """
         return {
             "messages": [("human", company_name)],
@@ -38,6 +45,8 @@ class Propagator:
             "instrument_context": instrument_context,
             "trade_date": str(trade_date),
             "past_context": past_context,
+            "verified_market_block": verified_market_block,
+            "verified_fundamentals_block": verified_fundamentals_block,
             "investment_debate_state": InvestDebateState(
                 {
                     "bull_history": "",
