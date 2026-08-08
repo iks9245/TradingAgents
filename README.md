@@ -93,6 +93,8 @@ Our framework decomposes complex trading tasks into specialized roles.
   <img src="assets/risk.png" width="70%" style="display: inline-block; margin: 0 2%;">
 </p>
 
+See [`docs/architecture.md`](docs/architecture.md) for what runs in what order, how state moves between nodes, and the three verification gates that sit outside the agents — including which rules are enforced deterministically and which are only asked for in a prompt.
+
 ## Installation and CLI
 
 ### Installation
