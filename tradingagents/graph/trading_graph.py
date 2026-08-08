@@ -28,6 +28,7 @@ from tradingagents.agents.utils.agent_utils import (
     resolve_instrument_identity,
 )
 from tradingagents.agents.utils.memory import TradingMemoryLog
+from tradingagents.agents.utils.verified_evidence import resolve_verified_evidence
 from tradingagents.dataflows.config import set_config
 from tradingagents.dataflows.utils import safe_ticker_component
 from tradingagents.default_config import DEFAULT_CONFIG
@@ -345,6 +346,20 @@ class TradingAgentsGraph:
         identity = resolve_instrument_identity(ticker)
         return build_instrument_context(ticker, asset_type, identity)
 
+    def resolve_verified_evidence(
+        self, ticker: str, trade_date: str, asset_type: str = "stock"
+    ) -> tuple[str, str]:
+        """Resolve the verified market and fundamentals blocks once per run.
+
+        Everything downstream of the analysts used to read prose only, which is
+        why a wrong figure in a report became a premise both sides of the debate
+        argued from. Resolving here means one lookup feeds the researchers, the
+        Research Manager, the Trader, and the Portfolio Manager. Like
+        ``resolve_instrument_context``, the CLI calls this too, so the blocks
+        reach the graph regardless of entry point.
+        """
+        return resolve_verified_evidence(ticker, str(trade_date), asset_type)
+
     def _run_signature(self, asset_type: str) -> str:
         """Graph-shape inputs that must invalidate a checkpoint if changed.
 
@@ -422,12 +437,17 @@ class TradingAgentsGraph:
         # deterministically resolved instrument identity for all agents.
         past_context = self.memory_log.get_past_context(company_name)
         instrument_context = self.resolve_instrument_context(company_name, asset_type)
+        market_block, fundamentals_block = self.resolve_verified_evidence(
+            company_name, str(trade_date), asset_type
+        )
         init_agent_state = self.propagator.create_initial_state(
             company_name,
             trade_date,
             asset_type=asset_type,
             past_context=past_context,
             instrument_context=instrument_context,
+            verified_market_block=market_block,
+            verified_fundamentals_block=fundamentals_block,
         )
         args = self.propagator.get_graph_args()
 

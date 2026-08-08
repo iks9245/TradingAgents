@@ -1127,11 +1127,21 @@ def run_analysis(checkpoint: bool | None = None, html: bool | None = None):
         instrument_context = graph.resolve_instrument_context(
             selections["ticker"], selections["asset_type"]
         )
+        # Same reason, same path: the agents after the analysts check report
+        # claims against these blocks, and they only have them if the entry
+        # point resolved them.
+        market_block, fundamentals_block = graph.resolve_verified_evidence(
+            selections["ticker"],
+            selections["analysis_date"],
+            selections["asset_type"],
+        )
         init_agent_state = graph.propagator.create_initial_state(
             selections["ticker"],
             selections["analysis_date"],
             asset_type=selections["asset_type"],
             instrument_context=instrument_context,
+            verified_market_block=market_block,
+            verified_fundamentals_block=fundamentals_block,
         )
         # Pass callbacks to graph config for tool execution tracking
         # (LLM tracking is handled separately via LLM constructor)

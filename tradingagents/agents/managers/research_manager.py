@@ -13,6 +13,7 @@ from tradingagents.agents.utils.structured import (
     bind_structured,
     invoke_structured_or_freetext,
 )
+from tradingagents.agents.utils.verified_evidence import get_verified_evidence_block
 
 
 def create_research_manager(llm):
@@ -21,6 +22,11 @@ def create_research_manager(llm):
     def research_manager_node(state) -> dict:
         instrument_context = get_instrument_context_from_state(state)
         history = state["investment_debate_state"].get("history", "")
+        # This node adjudicates on the debate transcript alone — it is not given
+        # the analyst reports. A figure laundered through two debate turns
+        # arrives here with nothing behind it, so the snapshots are the only way
+        # it can tell a quoted number from an invented one.
+        verified_evidence = get_verified_evidence_block(state)
 
         investment_debate_state = state["investment_debate_state"]
 
@@ -43,6 +49,8 @@ Commit to a clear stance whenever the debate's strongest arguments warrant one; 
 
 **Debate History:**
 {history}
+
+{verified_evidence}
 
 {NO_EXTERNAL_TOOLS}""" + get_evidence_discipline_instruction() + get_language_instruction()
 

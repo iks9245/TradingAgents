@@ -19,6 +19,7 @@ from tradingagents.agents.utils.structured import (
     bind_structured,
     invoke_structured_or_freetext,
 )
+from tradingagents.agents.utils.verified_evidence import get_verified_evidence_block
 from tradingagents.dataflows.market_data_validator import (
     get_trade_reference_levels,
     render_trade_reference_block,
@@ -63,6 +64,10 @@ def create_trader(llm):
         # described as "1-1.5x ATR". Resolve the levels once and inject them.
         levels = get_trade_reference_levels(company_name, state.get("trade_date"))
         levels_block = render_trade_reference_block(levels)
+        # Levels alone cannot check a claim about margins or EPS, and the plan
+        # this node prices is prose the Research Manager wrote from a debate.
+        # include_market=False because levels_block above already carries them.
+        verified_evidence = get_verified_evidence_block(state, include_market=False)
 
         messages = [
             {
@@ -89,6 +94,7 @@ def create_trader(llm):
                     f"social media sentiment. Use this plan as a foundation for evaluating your next "
                     f"trading decision.\n\nProposed Investment Plan: {investment_plan}\n\n"
                     f"{levels_block}\n\n"
+                    f"{verified_evidence}\n\n"
                     f"Leverage these insights to make an informed and strategic decision."
                 ),
             },
