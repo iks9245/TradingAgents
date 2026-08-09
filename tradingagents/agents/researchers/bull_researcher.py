@@ -3,6 +3,7 @@ from tradingagents.agents.utils.agent_utils import (
     get_instrument_context_from_state,
     get_language_instruction,
 )
+from tradingagents.agents.utils.verified_evidence import get_verified_evidence_block
 
 
 def create_bull_researcher(llm):
@@ -17,6 +18,10 @@ def create_bull_researcher(llm):
         news_report = state["news_report"]
         fundamentals_report = state["fundamentals_report"]
         instrument_context = get_instrument_context_from_state(state)
+        # Without this the bull and the bear read the identical four report
+        # fields and neither can look anything up, so a wrong figure enters as
+        # a premise both sides argue from rather than about.
+        verified_evidence = get_verified_evidence_block(state)
         asset_type = state.get("asset_type", "stock")
         target_label = "stock" if asset_type == "stock" else "asset"
         fundamentals_label = (
@@ -43,6 +48,8 @@ Latest world affairs news: {news_report}
 Conversation history of the debate: {history}
 Last bear argument: {current_response}
 Use this information to deliver a compelling bull argument, refute the bear's concerns, and engage in a dynamic debate that demonstrates the strengths of the bull position.
+
+{verified_evidence}
 """ + get_evidence_discipline_instruction() + get_language_instruction()
 
         response = llm.invoke(prompt)

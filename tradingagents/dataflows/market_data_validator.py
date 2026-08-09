@@ -10,6 +10,7 @@ claim. Deterministic, no LLM involved.
 
 from __future__ import annotations
 
+import functools
 from collections.abc import Iterable
 from dataclasses import dataclass
 
@@ -92,11 +93,18 @@ class TradeReference:
         return abs(entry - stop) / self.atr
 
 
+@functools.lru_cache(maxsize=64)
 def get_trade_reference_levels(symbol: str, curr_date: str) -> TradeReference | None:
     """Resolve the price levels behind a trade proposal, or None when unavailable.
 
     Returns None rather than raising: a missing snapshot must degrade the
     Trader's prompt to "no verified levels available", never block the run.
+
+    Cached because three call sites now want the same levels within one run —
+    the run-start resolution that fills the state, the Trader, and the
+    Portfolio Manager — and the settled bars behind them cannot change while a
+    run is in flight. ``TradeReference`` is frozen, so sharing one instance
+    between callers is safe.
     """
     if not symbol or not curr_date:
         return None
@@ -140,9 +148,24 @@ def get_trade_reference_levels(symbol: str, curr_date: str) -> TradeReference | 
         return None
 
 
-def render_trade_reference_block(ref: TradeReference | None) -> str:
-    """Render trade levels for a prompt, or an explicit unavailable notice."""
+def render_trade_reference_block(
+    ref: TradeReference | None, *, include_proposal_rule: bool = True
+) -> str:
+    """Render trade levels for a prompt, or an explicit unavailable notice.
+
+    ``include_proposal_rule=False`` drops the closing paragraph about stop
+    distances being checked against the proposal. Researchers and the Research
+    Manager read these levels to test claims in the reports; they do not set
+    stops, and telling them their arithmetic will be checked beneath a proposal
+    they never write describes a mechanism that does not apply to them.
+    """
     if ref is None:
+        if not include_proposal_rule:
+            return (
+                "**Verified price levels: UNAVAILABLE.** No market snapshot could "
+                "be resolved for this instrument. Do not treat any price level, "
+                "moving average, or volatility figure in the reports as verified."
+            )
         return (
             "**Verified price levels: UNAVAILABLE.** No market snapshot could be "
             "resolved for this instrument. Do not state an entry price, a stop "
@@ -171,13 +194,21 @@ def render_trade_reference_block(ref: TradeReference | None) -> str:
             f"- 1.0x ATR above last close: {ref.close + ref.atr:,.2f}",
             f"- 1.5x ATR above last close: {ref.close + 1.5 * ref.atr:,.2f}",
         ]
-    lines += [
-        "",
-        "Every price level you state must be consistent with these numbers. If you "
-        "describe a stop as a multiple of ATR, it must match the distance you "
-        "actually set — the arithmetic is checked and any mismatch is printed "
-        "beneath your proposal.",
-    ]
+    if include_proposal_rule:
+        lines += [
+            "",
+            "Every price level you state must be consistent with these numbers. If you "
+            "describe a stop as a multiple of ATR, it must match the distance you "
+            "actually set — the arithmetic is checked and any mismatch is printed "
+            "beneath your proposal.",
+        ]
+    else:
+        lines += [
+            "",
+            "These are the settled figures for this instrument. Any price level, "
+            "moving average, or volatility figure stated in the reports or in the "
+            "debate must be consistent with them.",
+        ]
     return "\n".join(lines)
 
 

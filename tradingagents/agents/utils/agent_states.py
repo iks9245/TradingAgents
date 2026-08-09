@@ -49,6 +49,12 @@ class AgentState(MessagesState):
     asset_type: Annotated[str, "Asset type under analysis such as stock or crypto"]
     instrument_context: Annotated[str, "Deterministic ticker identity resolved at run start"]
     trade_date: Annotated[str, "What date we are trading at"]
+    verified_market_block: Annotated[
+        str, "Verified price levels resolved at run start, for agents downstream of the analysts"
+    ]
+    verified_fundamentals_block: Annotated[
+        str, "Verified fundamentals snapshot resolved at run start, same audience"
+    ]
 
     sender: Annotated[str, "Agent that sent this message"]
 

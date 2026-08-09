@@ -97,6 +97,8 @@ structured `AgentState` (`agents/utils/agent_states.py`):
     "trade_date": "2026-08-07",
     "instrument_context": ...,      # resolved once at run start
     "past_context": ...,            # reflections recalled from the memory log
+    "verified_market_block": ...,   # snapshots for the agents after the
+    "verified_fundamentals_block": ...,  # analysts; also resolved once
 
     "market_report": ...,           # stage 1 writes four of these
     "sentiment_report": ...,
@@ -166,7 +168,7 @@ message carries tool calls. When it does not, the analyst is done and the run
 passes through a `create_msg_delete()` node before the next analyst starts. What
 crosses that boundary is the finished report, nothing else.
 
-## What the debate cannot catch
+## What the debate could not catch, and what changed
 
 The bull and bear researchers each read the same four fields:
 
@@ -177,13 +179,14 @@ news_report            = state["news_report"]
 fundamentals_report    = state["fundamentals_report"]
 ```
 
-Neither has an independent route back to the source data. A wrong figure that
-reaches those reports becomes a **shared premise**: the bull argues from it, the
-bear argues against the conclusion rather than the number, and the adversarial
-structure never touches it. Adversarial agents can contest interpretations of a
-fact; they cannot contest the fact itself when both sides were handed it.
+For a long time that was *all* either of them read, and neither had a route back
+to the source data. A wrong figure reaching those reports became a **shared
+premise**: the bull argued from it, the bear argued against the conclusion rather
+than the number, and the adversarial structure never touched it. Adversarial
+agents can contest interpretations of a fact; they cannot contest the fact itself
+when both sides were handed it and neither can look it up.
 
-This is not hypothetical. Every numeric defect found in shipped reports so far
+This was not hypothetical. Every numeric defect found in shipped reports
 survived a debate that ran exactly as designed:
 
 | Defect | What the debate did |
@@ -194,9 +197,42 @@ survived a debate that ran exactly as designed:
 | Segment ASP restated as company-wide pricing power | Treated as established |
 | A StockTwits number restated until it read as fact | Made it a pillar of the rating |
 
-The conclusion the codebase draws from this is structural: **verification has to
-be its own layer, upstream and downstream of the agents, and it cannot be
-delegated to them.**
+The first conclusion is structural and still holds: **verification has to be its
+own layer, and it cannot be delegated to the agents.** That is what the three
+gates below are.
+
+The second conclusion is that the debate was being asked to catch these without
+the means to. `agents/utils/verified_evidence.py` resolves both snapshots once at
+run start, stores them on the state, and hands them to every agent after the
+analysts:
+
+| Agent | Verified market levels | Verified fundamentals |
+|---|---|---|
+| Bull / Bear Researcher | yes | yes |
+| Research Manager | yes | yes |
+| Trader | its own execution-flavoured block | yes |
+| Portfolio Manager | its own execution-flavoured block | yes |
+
+The rule attached to the block is what makes it more than extra context: where a
+report, a debate turn, or a social post disagrees with a verified figure, **the
+verified figure stands and the conflict gets named** — not averaged, not silently
+resolved. A debater can now argue *about* a premise rather than only from it,
+which is the one place in the pipeline where a wrong premise can still be
+challenged; every check after this point runs on prose that already contains it.
+
+Two boundaries worth knowing. The Trader and the Portfolio Manager already render
+their own price-levels block carrying the execution rule about ATR distances, so
+they receive `include_market=False` and are not handed the same numbers twice
+under two headings. And the three risk debators are **not** on this path yet:
+they argue about a proposal the Trader has already priced against verified
+levels, so the same laundering is possible but one step further from the source.
+Extending it there is a follow-up, not an oversight.
+
+A state built without the blocks — a bare programmatic state, a test — degrades
+to the explicit "unavailable" notices rather than resolving them mid-graph, the
+same rule `get_instrument_context_from_state` follows for the instrument context.
+The degradation is visible in the prompt, so an agent told the figures are
+unavailable declines to state them instead of quietly inventing them.
 
 ## The three gates
 
@@ -479,5 +515,6 @@ measures the marginal value of more debate, not of debate versus none.
 | `report_lint.py` | Gate 3 |
 | `provenance.py` | The code-revision stamp |
 | `agents/utils/evidence_policy.py` | Evidence tiers and scope discipline |
+| `agents/utils/verified_evidence.py` | The snapshots handed to agents after the analysts |
 | `agents/utils/rating.py` | The five-tier vocabulary and its parsers |
 | `backtest/ablation.py` | Pricing what each component contributes |

@@ -21,6 +21,7 @@ from tradingagents.agents.utils.structured import (
     bind_structured,
     invoke_structured_or_freetext,
 )
+from tradingagents.agents.utils.verified_evidence import get_verified_evidence_block
 from tradingagents.dataflows.market_data_validator import (
     get_trade_reference_levels,
     render_trade_reference_block,
@@ -53,6 +54,10 @@ def create_portfolio_manager(llm):
             state["company_of_interest"], state.get("trade_date")
         )
         levels_block = render_trade_reference_block(levels)
+        # The invented "40x 2025 PE" above is exactly what price levels cannot
+        # catch: checking a multiple needs the EPS, which lives in the
+        # fundamentals snapshot. include_market=False — levels_block has those.
+        verified_evidence = get_verified_evidence_block(state, include_market=False)
 
         prompt = f"""As the Portfolio Manager, synthesize the risk analysts' debate and deliver the final trading decision.
 
@@ -78,13 +83,16 @@ def create_portfolio_manager(llm):
 
 {levels_block}
 
+{verified_evidence}
+
 **Valuation claims.** Do not state a P/E, EV/EBITDA, or any other valuation
-multiple unless that exact figure appears in the context above. You do not have
-the fundamentals report in this prompt, so you cannot derive one — a multiple you
-compute here would be a guess presented as arithmetic. If you set a price target,
-justify it against the verified price levels above, or against a figure quoted
-verbatim in the debate with its source named. Any multiple you do quote must name
-its EPS basis and period.
+multiple unless that exact figure appears in the verified blocks above, or is
+quoted verbatim in the debate with its source named. Do not compute one yourself
+from statement lines — the verified fundamentals block already prints the
+multiples it can support, with their operands, and a figure you derive here
+instead would be a guess presented as arithmetic. Any multiple you quote must
+carry the EPS basis and period the block gave it. If you set a price target,
+justify it against these verified figures and say which one.
 
 Be decisive and ground every conclusion in specific evidence from the analysts.
 
