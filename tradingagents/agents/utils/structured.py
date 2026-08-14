@@ -25,6 +25,8 @@ from typing import Any, TypeVar
 from langchain_core.messages import HumanMessage
 from pydantic import BaseModel, ValidationError
 
+from tradingagents.agents.utils.evidence_policy import UNVALIDATED_MARKER
+
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T", bound=BaseModel)
@@ -88,10 +90,6 @@ def _with_correction(prompt: Any, exc: BaseException) -> Any:
             return messages + [{"role": "user", "content": correction}]
         return messages + [HumanMessage(content=correction)]
     return prompt
-
-
-# Callers detect a fallback by looking for this in the returned text.
-UNVALIDATED_MARKER = "**Unvalidated output.**"
 
 
 def _mark_unvalidated(text: str, agent_name: str, bypassed_checks: str, reason: str) -> str:

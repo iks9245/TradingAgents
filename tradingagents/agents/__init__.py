@@ -1,20 +1,9 @@
-from .analysts.fundamentals_analyst import create_fundamentals_analyst
-from .analysts.market_analyst import create_market_analyst
-from .analysts.news_analyst import create_news_analyst
-from .analysts.sentiment_analyst import (
-    create_sentiment_analyst,
-    create_social_media_analyst,  # deprecated alias kept for back-compat
-)
-from .managers.portfolio_manager import create_portfolio_manager
-from .managers.research_manager import create_research_manager
-from .researchers.bear_researcher import create_bear_researcher
-from .researchers.bull_researcher import create_bull_researcher
-from .risk_mgmt.aggressive_debator import create_aggressive_debator
-from .risk_mgmt.conservative_debator import create_conservative_debator
-from .risk_mgmt.neutral_debator import create_neutral_debator
-from .trader.trader import create_trader
-from .utils.agent_states import AgentState, InvestDebateState, RiskDebateState
-from .utils.agent_utils import create_msg_delete
+"""Public agent factories, loaded only when their attributes are requested."""
+
+from __future__ import annotations
+
+from importlib import import_module
+from typing import Any
 
 __all__ = [
     "AgentState",
@@ -35,3 +24,38 @@ __all__ = [
     "create_social_media_analyst",  # deprecated; will be removed in a future version
     "create_trader",
 ]
+
+# Keeping the package facade cheap lets utility modules remain usable when the
+# optional LLM stack is unavailable.
+_EXPORT_MODULES = {
+    "AgentState": ".utils.agent_states",
+    "create_msg_delete": ".utils.agent_utils",
+    "InvestDebateState": ".utils.agent_states",
+    "RiskDebateState": ".utils.agent_states",
+    "create_bear_researcher": ".researchers.bear_researcher",
+    "create_bull_researcher": ".researchers.bull_researcher",
+    "create_research_manager": ".managers.research_manager",
+    "create_fundamentals_analyst": ".analysts.fundamentals_analyst",
+    "create_market_analyst": ".analysts.market_analyst",
+    "create_neutral_debator": ".risk_mgmt.neutral_debator",
+    "create_news_analyst": ".analysts.news_analyst",
+    "create_aggressive_debator": ".risk_mgmt.aggressive_debator",
+    "create_portfolio_manager": ".managers.portfolio_manager",
+    "create_conservative_debator": ".risk_mgmt.conservative_debator",
+    "create_sentiment_analyst": ".analysts.sentiment_analyst",
+    "create_social_media_analyst": ".analysts.sentiment_analyst",
+    "create_trader": ".trader.trader",
+}
+
+
+def __getattr__(name: str) -> Any:
+    module_name = _EXPORT_MODULES.get(name)
+    if module_name is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    value = getattr(import_module(module_name, __name__), name)
+    globals()[name] = value
+    return value
+
+
+def __dir__() -> list[str]:
+    return sorted(__all__)

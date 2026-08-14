@@ -17,6 +17,7 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_MAX_RISK_ROUNDS":      "max_risk_discuss_rounds",
     "TRADINGAGENTS_CHECKPOINT_ENABLED":   "checkpoint_enabled",
     "TRADINGAGENTS_REPORT_HTML":          "report_html",
+    "TRADINGAGENTS_REPORT_INDEX":         "report_index",
     "TRADINGAGENTS_BENCHMARK_TICKER":     "benchmark_ticker",
     "TRADINGAGENTS_TEMPERATURE":          "temperature",
     "TRADINGAGENTS_LLM_MAX_RETRIES":      "llm_max_retries",
@@ -82,6 +83,11 @@ DEFAULT_CONFIG = _apply_env_overrides({
     # each saved run. Markdown stays the source of truth; the HTML is
     # generated from it and its failure never blocks the save.
     "report_html": True,
+    # Refresh the sibling index.html listing every saved run after each save,
+    # so a finished run's warnings and code revision are visible without
+    # opening it. Only applies when the run directory is named the way
+    # tradingagents.run_index reads; its failure never blocks the save.
+    "report_index": True,
     # LLM settings
     "llm_provider": "openai",
     "deep_think_llm": "gpt-5.5",

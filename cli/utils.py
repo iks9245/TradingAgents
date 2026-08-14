@@ -602,13 +602,14 @@ def confirm_ollama_endpoint(url: str) -> None:
         )
 
 
-def ensure_api_key(provider: str) -> str | None:
+def ensure_api_key(provider: str, non_interactive: bool = False) -> str | None:
     """Make sure the API key for `provider` is available in the environment.
 
     If the env var is already set, returns its value untouched. Otherwise
     interactively prompts the user, persists the value to the project's
     .env file via python-dotenv's set_key (creating .env if needed), and
-    exports it into os.environ so the current process picks it up.
+    exports it into os.environ so the current process picks it up. In
+    non-interactive mode a missing required key is reported without prompting.
 
     Returns None for providers that do not require a key (e.g. ollama)
     and for providers not found in the canonical mapping.
@@ -631,6 +632,9 @@ def ensure_api_key(provider: str) -> str | None:
     console.print(
         f"\n[yellow]{env_var} is not set in your environment.[/yellow]"
     )
+    if non_interactive:
+        return None
+
     key = questionary.password(
         f"Paste your {env_var} (will be saved to .env):",
         style=questionary.Style([

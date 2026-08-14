@@ -1,5 +1,6 @@
 # TradingAgents/graph/__init__.py
 
+from . import _compat as _compat
 from .conditional_logic import ConditionalLogic
 from .propagation import Propagator
 from .reflection import Reflector
