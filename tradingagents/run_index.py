@@ -150,6 +150,15 @@ def _scan_run(path: Path, match: re.Match[str]) -> RunRecord:
     )
 
 
+def is_run_directory(path: Path | str) -> bool:
+    """True when ``path`` is named like a run :func:`scan_runs` would recognize.
+
+    Exposed so a writer can ask whether the directory it just filled belongs to
+    an index, rather than assuming every save path is one.
+    """
+    return _RUN_ID_RE.fullmatch(Path(path).name) is not None
+
+
 def scan_runs(reports_dir: Path | str = "reports") -> list[RunRecord]:
     """Return recognized report runs newest-first, tolerating damaged artifacts."""
     root = Path(reports_dir).expanduser()
@@ -270,6 +279,25 @@ def render_index_html(records: Sequence[RunRecord]) -> str:
     )
 
 
+def write_index(
+    reports_dir: Path | str, *, out: Path | str | None = None, markdown: bool = False
+) -> Path:
+    """Scan ``reports_dir`` and write its index; return the path written.
+
+    Raises ``OSError`` if the file cannot be written. Scanning itself never
+    raises, so a damaged run still reaches the page.
+    """
+    reports_dir = Path(reports_dir).expanduser()
+    records = scan_runs(reports_dir)
+    content = render_index_markdown(records) if markdown else render_index_html(records)
+
+    default_name = "index.md" if markdown else "index.html"
+    destination = Path(out).expanduser() if out else reports_dir / default_name
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(content, encoding="utf-8")
+    return destination
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m tradingagents.run_index",
@@ -296,17 +324,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    reports_dir = Path(args.reports_dir).expanduser()
-    records = scan_runs(reports_dir)
-    content = (
-        render_index_markdown(records) if args.markdown else render_index_html(records)
-    )
-    default_name = "index.md" if args.markdown else "index.html"
-    out = Path(args.out).expanduser() if args.out else reports_dir / default_name
-
     try:
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(content, encoding="utf-8")
+        out = write_index(args.reports_dir, out=args.out, markdown=args.markdown)
     except OSError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2

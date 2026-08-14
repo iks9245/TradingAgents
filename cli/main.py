@@ -889,8 +889,10 @@ def get_analysis_date():
 def save_report_to_disk(final_state, ticker: str, save_path: Path) -> ReportPaths:
     """Save the complete analysis report to disk (shared CLI/API writer).
 
-    Returns both paths: the markdown tree and, unless disabled via
-    ``report_html``, the browsable HTML page written beside it.
+    Returns every path written: the markdown tree, the browsable HTML page
+    beside it unless disabled via ``report_html``, and the refreshed run index
+    unless disabled via ``report_index`` or skipped for a save path the index
+    does not describe.
     """
     return write_report_bundle(final_state, ticker, save_path)
 
@@ -1102,7 +1104,10 @@ def format_tool_args(args, max_length=80) -> str:
     return result
 
 def _build_run_config(
-    selections: dict, checkpoint: bool | None, html: bool | None = None
+    selections: dict,
+    checkpoint: bool | None,
+    html: bool | None = None,
+    index: bool | None = None,
 ) -> dict:
     """Assemble the run config from interactive selections, honoring env precedence.
 
@@ -1134,6 +1139,9 @@ def _build_run_config(
     # TRADINGAGENTS_REPORT_HTML / the default.
     if html is not None:
         config["report_html"] = html
+    # And for --index/--no-index: TRADINGAGENTS_REPORT_INDEX / the default.
+    if index is not None:
+        config["report_index"] = index
     return config
 
 
@@ -1141,6 +1149,7 @@ def run_analysis(
     *,
     checkpoint: bool | None = None,
     html: bool | None = None,
+    index: bool | None = None,
     ticker: str | None = None,
     date: str | None = None,
     analysts: str | None = None,
@@ -1157,7 +1166,7 @@ def run_analysis(
         non_interactive=non_interactive,
     )
 
-    config = _build_run_config(selections, checkpoint, html)
+    config = _build_run_config(selections, checkpoint, html, index)
 
     # Create stats callback handler for tracking LLM/tool calls
     stats_handler = StatsCallbackHandler()
@@ -1451,6 +1460,8 @@ def run_analysis(
                 # Absolute path so it can be pasted straight into a browser.
                 console.print(f"  [dim]Browser version:[/dim] {paths.html.name}")
                 console.print(f"  [dim]Open:[/dim] file://{paths.html.resolve()}")
+            if paths.index:
+                console.print(f"  [dim]Run index:[/dim] file://{paths.index.resolve()}")
         except Exception as e:
             console.print(f"[red]Error saving report: {e}[/red]")
             # An interactive user reads that message and still has the report on
@@ -1497,6 +1508,12 @@ def analyze(
         "--html/--no-html",
         help="Write a browsable complete_report.html beside the saved markdown "
         "report. Omit to honor TRADINGAGENTS_REPORT_HTML (default: on).",
+    ),
+    index: bool | None = typer.Option(
+        None,
+        "--index/--no-index",
+        help="Refresh the index.html listing every run in the save directory's "
+        "parent. Omit to honor TRADINGAGENTS_REPORT_INDEX (default: on).",
     ),
     ticker: str | None = typer.Option(
         None,
@@ -1545,6 +1562,7 @@ def analyze(
         run_analysis(
             checkpoint=checkpoint,
             html=html,
+            index=index,
             ticker=ticker,
             date=date,
             analysts=analysts,

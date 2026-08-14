@@ -201,6 +201,26 @@ override the scripted defaults. The last line of stdout on success is the
 resolved report directory, so a calling script can find the output without
 guessing.
 
+### The run index
+
+Every save refreshes `index.html` beside the run directory: one row per run,
+showing its rating, price target, the code revision that produced it, and a
+status of `ok`, `incomplete`, `N warnings`, `N unvalidated`, `unknown code`, or
+`local changes`. Rows needing attention are marked, so a run whose numbers
+failed to reconcile is visible without opening it.
+
+The index describes a directory of runs, so it is refreshed only where the run
+is named `<TICKER>_<YYYYMMDD>_<HHMMSS>`. Saving to a path of any other shape
+(`--save-to /tmp/scratch`) writes no index, and its failure never blocks a save.
+Use `--no-index`, or `TRADINGAGENTS_REPORT_INDEX=false`, to turn it off.
+
+Rebuild one at any time — over a directory of older runs, for instance:
+
+```bash
+python -m tradingagents.run_index reports
+python -m tradingagents.run_index reports --markdown -o runs.md
+```
+
 Exit codes: `0` completed, `1` the analysis or the save failed, `2` a usage or
 configuration problem (missing `--ticker`, bad date, unknown analyst, absent API
 key). Supplying `--ticker`/`--date`/`--analysts` *without* `--non-interactive`

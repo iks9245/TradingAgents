@@ -11,6 +11,14 @@ fails the markdown tree is already on disk and is kept. Losing a finished run's
 report because a renderer raised would be far worse than not having the HTML.
 Set ``report_html`` to false in config (or ``TRADINGAGENTS_REPORT_HTML=false``)
 to skip it.
+
+When the run directory is named the way ``tradingagents.run_index`` reads
+(``<TICKER>_<YYYYMMDD>_<HHMMSS>``), the sibling ``index.html`` is refreshed too,
+so a finished run is visible next to its predecessors without anyone
+remembering to rebuild the index. A save path of any other shape is left alone:
+the index describes a directory of runs, and the caller who named an arbitrary
+output folder did not ask for one there. Set ``report_index`` to false in config
+(or ``TRADINGAGENTS_REPORT_INDEX=false``) to skip it.
 """
 
 from __future__ import annotations
@@ -27,13 +35,14 @@ logger = logging.getLogger(__name__)
 class ReportPaths:
     """Where a run's reports landed.
 
-    ``html`` is None when the HTML was disabled or could not be generated, so
-    callers can report only what actually exists rather than printing a path to
-    a file that is not there.
+    ``html`` and ``index`` are None when they were disabled, skipped, or could
+    not be generated, so callers can report only what actually exists rather
+    than printing a path to a file that is not there.
     """
 
     markdown: Path
     html: Path | None = None
+    index: Path | None = None
 
 
 def _code_revision() -> str:
@@ -51,38 +60,58 @@ def _code_revision() -> str:
         return "unknown"
 
 
-def _html_enabled(explicit: bool | None) -> bool:
-    """Resolve the HTML setting: explicit argument wins, else live config."""
+def _enabled(key: str, explicit: bool | None) -> bool:
+    """Resolve an output setting: explicit argument wins, else live config."""
     if explicit is not None:
         return explicit
     try:
         from tradingagents.dataflows.config import get_config
 
-        return bool(get_config().get("report_html", True))
+        return bool(get_config().get(key, True))
     except Exception:  # config not initialised (bare library use)
         return True
 
 
-def write_report_tree(final_state: dict, ticker: str, save_path, *, html: bool | None = None) -> Path:
+def write_report_tree(
+    final_state: dict,
+    ticker: str,
+    save_path,
+    *,
+    html: bool | None = None,
+    index: bool | None = None,
+) -> Path:
     """Save a completed run's reports to ``save_path``; return the complete-report path.
 
     Kept returning the markdown path for backwards compatibility. Use
-    :func:`write_report_bundle` when you also need the HTML path.
+    :func:`write_report_bundle` when you also need the HTML or index path.
     """
-    return write_report_bundle(final_state, ticker, save_path, html=html).markdown
+    return write_report_bundle(
+        final_state, ticker, save_path, html=html, index=index
+    ).markdown
 
 
 def write_report_bundle(
-    final_state: dict, ticker: str, save_path, *, html: bool | None = None
+    final_state: dict,
+    ticker: str,
+    save_path,
+    *,
+    html: bool | None = None,
+    index: bool | None = None,
 ) -> ReportPaths:
-    """Write the markdown tree and, unless disabled, the HTML page beside it."""
+    """Write the markdown tree, the HTML page beside it, and refresh the index."""
     markdown_path = _write_markdown_tree(final_state, ticker, save_path)
 
     html_path = None
-    if _html_enabled(html):
+    if _enabled("report_html", html):
         html_path = _write_html(markdown_path, ticker)
 
-    return ReportPaths(markdown=markdown_path, html=html_path)
+    # After the HTML, so the fresh run is linked as a page rather than as raw
+    # markdown: render_index_html picks whichever of the two is on disk.
+    index_path = None
+    if _enabled("report_index", index):
+        index_path = _write_index(markdown_path.parent)
+
+    return ReportPaths(markdown=markdown_path, html=html_path, index=index_path)
 
 
 def _write_html(markdown_path: Path, ticker: str) -> Path | None:
@@ -109,6 +138,32 @@ def _write_html(markdown_path: Path, ticker: str) -> Path | None:
         logger.warning(
             "Could not write the HTML report (the markdown report at %s is unaffected): %s",
             markdown_path, exc,
+        )
+        return None
+
+
+def _write_index(run_dir: Path) -> Path | None:
+    """Refresh the run index in ``run_dir``'s parent, if that is what it is.
+
+    Returns None when the run was saved somewhere the index does not describe,
+    and on any failure: like the HTML, this runs after the report is already on
+    disk, and a scan over unrelated sibling directories must not turn a
+    completed analysis into a failed save.
+    """
+    try:
+        from tradingagents.run_index import is_run_directory, write_index
+
+        if not is_run_directory(run_dir):
+            logger.debug(
+                "Not refreshing a run index: %s is not named <TICKER>_<YYYYMMDD>_<HHMMSS>",
+                run_dir,
+            )
+            return None
+        return write_index(run_dir.parent)
+    except Exception as exc:
+        logger.warning(
+            "Could not refresh the run index beside %s (the report itself is unaffected): %s",
+            run_dir, exc,
         )
         return None
 
