@@ -34,6 +34,11 @@ _PRICE_TARGET_RE = re.compile(
 )
 
 
+def _plural(count: int, noun: str) -> str:
+    """Count and noun, agreeing. Both are read by people, so both should."""
+    return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
+
+
 @dataclass(frozen=True)
 class RunRecord:
     """Metadata preserved by one report directory."""
@@ -61,8 +66,7 @@ class RunRecord:
         if not self.complete:
             labels.append("incomplete")
         if self.warning_count:
-            suffix = "warning" if self.warning_count == 1 else "warnings"
-            labels.append(f"{self.warning_count} {suffix}")
+            labels.append(_plural(self.warning_count, "warning"))
         if self.unvalidated_sections:
             labels.append(f"{self.unvalidated_sections} unvalidated")
         if self.code_revision is None:
@@ -275,7 +279,7 @@ def render_index_html(records: Sequence[RunRecord]) -> str:
     return render_page(
         title="Analysis runs",
         body=body,
-        subtitle=f"{len(records)} runs",
+        subtitle=_plural(len(records), "run"),
     )
 
 

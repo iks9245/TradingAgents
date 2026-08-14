@@ -299,6 +299,14 @@ def test_html_is_self_contained_escaped_and_prefers_html_report(tmp_path):
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("count, expected", [(0, "0 runs"), (1, "1 run"), (2, "2 runs")])
+def test_the_html_subtitle_counts_runs_in_agreement(tmp_path, count, expected):
+    records = [_record(tmp_path, ticker=f"T{index}") for index in range(count)]
+
+    assert expected in render_index_html(records)
+
+
+@pytest.mark.unit
 def test_main_writes_output_and_missing_directory_still_succeeds(tmp_path):
     reports = tmp_path / "reports"
     _make_run(reports, "INTC_20260807_230554", report=_report(code="abc1234"))
