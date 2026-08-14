@@ -38,6 +38,7 @@ from tradingagents.dataflows.fundamentals_validator import (
 )
 from tradingagents.dataflows.market_data_validator import (
     get_trade_reference_levels,
+    parse_trade_reference_block,
     render_trade_reference_block,
 )
 
@@ -133,6 +134,29 @@ def get_verified_evidence_block(
     )
     sections.append(VERIFIED_EVIDENCE_RULE)
     return "\n\n".join(sections)
+
+
+def verified_figures_from_state(state: Mapping[str, Any]) -> dict[str, float]:
+    """The run's settled figures, keyed by the metric names ``report_lint`` uses.
+
+    The report linter is the last gate, and until now the only reference it had
+    for "is this number right" was the rest of the report. The same blocks that
+    let the debate check a premise let the linter adjudicate one — the state
+    already carries them, so this is a read rather than a lookup, which matters
+    because linting happens while a finished report is being written.
+
+    Only the market block contributes. Its levels are a fixed list of labelled
+    numbers, so reading them back is exact; the fundamentals snapshot is prose
+    and tables built around whichever statements a vendor returned, and guessing
+    at figures from it would put invented authority behind a warning.
+    """
+    market = state.get("verified_market_block")
+    if not _is_present(market):
+        return {}
+    try:
+        return parse_trade_reference_block(market)
+    except Exception:  # noqa: BLE001 — no figure is better than a wrong one
+        return {}
 
 
 def _is_present(value: Any) -> bool:

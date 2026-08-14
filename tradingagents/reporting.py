@@ -142,6 +142,26 @@ def _write_html(markdown_path: Path, ticker: str) -> Path | None:
         return None
 
 
+def _verified_figures(final_state: dict) -> dict:
+    """The run's settled figures for the linter, or nothing if they cannot be read.
+
+    Resolved separately from the lint itself so the two fail independently. The
+    figures come from a module that reaches the market-data stack, and losing
+    every numeric check because that stack is unavailable would trade a strong
+    version of the gate for none at all rather than for the weaker one that has
+    always worked on the report's own text.
+    """
+    try:
+        from tradingagents.agents.utils.verified_evidence import (
+            verified_figures_from_state,
+        )
+
+        return verified_figures_from_state(final_state)
+    except Exception as exc:  # noqa: BLE001 — the lint still runs without these
+        logger.debug("Linting without verified figures to adjudicate against: %s", exc)
+        return {}
+
+
 def _write_index(run_dir: Path) -> Path | None:
     """Refresh the run index in ``run_dir``'s parent, if that is what it is.
 
@@ -286,7 +306,7 @@ def _write_markdown_tree(final_state: dict, ticker: str, save_path) -> Path:
     try:
         from tradingagents.report_lint import lint_report, render_warning_block
 
-        findings = lint_report(body)
+        findings = lint_report(body, verified=_verified_figures(final_state))
         warning_block = render_warning_block(findings)
         if findings:
             (save_path / "numeric_warnings.md").write_text(warning_block, encoding="utf-8")
