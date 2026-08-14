@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 
@@ -382,7 +383,94 @@ def _distinct_values(values: list[_MetricValue]) -> list[_MetricValue]:
     return [distinct[number] for number in sorted(distinct)]
 
 
-def _metric_findings(markdown: str) -> list[Finding]:
+def _states_verified(stated: _MetricValue, verified: float, metric: str) -> bool:
+    """True when a statement is a faithful reading of the verified figure.
+
+    Two ways to be faithful, because either alone gets a real case wrong. A
+    writer who put no decimals is claiming precision to the unit, so an ATR
+    verified at 8.09 written "8" is exact at the precision offered — but the
+    relative bound alone calls that a 1.1% error and reports it. Conversely a
+    50-day average written "110.59" against a verified 110.60 is a cent out at
+    the precision offered, which the last-place rule alone would report; the
+    relative bound is what recognises it as the same figure.
+
+    What passes neither is the case this exists for: a level stated as 99.43
+    when the source says 110.60.
+    """
+    difference = abs(stated.value - verified)
+    decimals = len(stated.display.partition(".")[2])
+    if difference <= 0.5 * 10 ** -decimals:
+        return True
+    tolerance = _METRIC_TOLERANCE.get(metric, _DEFAULT_TOLERANCE)
+    return difference <= tolerance * abs(verified)
+
+
+def _contradiction_findings(
+    metric: str, stated: list[_MetricValue], verified: float
+) -> list[Finding]:
+    """Findings for statements that disagree with the run's own source data.
+
+    Stronger than the spread check in two ways. It names which value is wrong
+    instead of reporting that two exist, and it catches a single wrong figure —
+    a report that states one incorrect 50-day average, consistently, has no
+    spread to detect and passes the other check untouched.
+    """
+    contradicting = [v for v in stated if not _states_verified(v, verified, metric)]
+    if not contradicting:
+        return []
+
+    furthest = max(contradicting, key=lambda value: abs(value.value - verified))
+    rendered = ", ".join(value.display for value in _distinct_values(contradicting))
+    return [
+        Finding(
+            kind="contradiction",
+            summary=(
+                f"{metric} is stated as {furthest.display}, but the verified "
+                f"value is {_display_number(verified)}"
+            ),
+            detail=(
+                f"Verified {metric}: {_display_number(verified)}. Contradicting "
+                f"statements: {rendered}. Statements that read the verified "
+                f"figure faithfully, rounding included, are not listed."
+            ),
+        )
+    ]
+
+
+def _spread_findings(metric: str, distinct: list[_MetricValue]) -> list[Finding]:
+    """Findings for a metric carrying two values, with no source to adjudicate.
+
+    All this can say is that the report disagrees with itself. Which value is
+    right is not recoverable from the text, so neither is asserted.
+    """
+    if len(distinct) < 2:
+        return []
+    smallest, largest = distinct[0].value, distinct[-1].value
+    spread = largest - smallest
+    tolerance = _METRIC_TOLERANCE.get(metric, _DEFAULT_TOLERANCE)
+    # These are normally positive market figures.  Treat a zero base
+    # conservatively so it cannot cause division by zero in a failed
+    # report, while preserving the relative rule otherwise.
+    conflicts = spread > 0 if smallest == 0 else spread > tolerance * abs(smallest)
+    if not conflicts:
+        return []
+    rendered_values = ", ".join(value.display for value in distinct)
+    return [
+        Finding(
+            kind="conflict",
+            summary=(
+                f"{metric} is stated as both {_display_number(smallest)} "
+                f"and {_display_number(largest)}"
+            ),
+            detail=f"Distinct values found for {metric}: {rendered_values}.",
+        )
+    ]
+
+
+def _metric_findings(
+    markdown: str, verified: Mapping[str, float] | None = None
+) -> list[Finding]:
+    verified = verified or {}
     findings: list[Finding] = []
     for metric, occurrences in _metric_values(markdown).items():
         # A price level is quoted in currency, so a number next to one of these
@@ -396,27 +484,17 @@ def _metric_findings(markdown: str) -> list[Finding]:
         # conflict nor excuses one, so it sits out the comparison entirely.
         # Letting it widen the tolerance instead meant one hedged mention
         # anywhere in the report silenced the check for every precise one.
-        distinct = _distinct_values([v for v in occurrences if not v.approximate])
-        if len(distinct) >= 2:
-            smallest, largest = distinct[0].value, distinct[-1].value
-            spread = largest - smallest
-            tolerance = _METRIC_TOLERANCE.get(metric, _DEFAULT_TOLERANCE)
-            # These are normally positive market figures.  Treat a zero base
-            # conservatively so it cannot cause division by zero in a failed
-            # report, while preserving the relative rule otherwise.
-            conflicts = spread > 0 if smallest == 0 else spread > tolerance * abs(smallest)
-            if conflicts:
-                rendered_values = ", ".join(value.display for value in distinct)
-                findings.append(
-                    Finding(
-                        kind="conflict",
-                        summary=(
-                            f"{metric} is stated as both {_display_number(smallest)} "
-                            f"and {_display_number(largest)}"
-                        ),
-                        detail=f"Distinct values found for {metric}: {rendered_values}.",
-                    )
-                )
+        stated = [v for v in occurrences if not v.approximate]
+        verified_value = verified.get(metric)
+        if verified_value is None:
+            findings += _spread_findings(metric, _distinct_values(stated))
+        else:
+            # Adjudication replaces the spread check rather than joining it: a
+            # rounding and its precise twin would otherwise be reported as a
+            # conflict by one check while the other confirms both against the
+            # source, and two findings disagreeing about one figure is worse
+            # than either alone.
+            findings += _contradiction_findings(metric, stated, verified_value)
 
         if metric not in _RATIO_METRICS:
             continue
@@ -556,15 +634,26 @@ def _strip_existing_warnings(markdown: str) -> str:
     return "\n".join(kept)
 
 
-def lint_report(markdown: str) -> list[Finding]:
-    """Return numeric findings without ever allowing linting to fail a report save."""
+def lint_report(
+    markdown: str, *, verified: Mapping[str, float] | None = None
+) -> list[Finding]:
+    """Return numeric findings without ever allowing linting to fail a report save.
+
+    ``verified`` maps a metric key to the figure the run's own source data
+    settled on. Where one is supplied the check adjudicates against it and can
+    name the wrong value; where it is absent — an older run, a metric no
+    snapshot covers, a vendor that did not answer — the report remains its own
+    only reference and the check falls back to reporting disagreement.
+    """
     try:
         if not isinstance(markdown, str):
             return []
+        if not isinstance(verified, Mapping):
+            verified = None
         markdown = _strip_existing_warnings(markdown)
         return (
             _division_findings(markdown)
-            + _metric_findings(markdown)
+            + _metric_findings(markdown, verified)
             + _crosslabel_findings(markdown)
         )
     except Exception:
@@ -575,14 +664,18 @@ def render_warning_block(findings: list[Finding]) -> str:
     """Render findings as the prominent warning block for the consolidated report."""
     if not findings:
         return ""
-    severity = {"arithmetic": 0, "unit": 1, "crosslabel": 2, "conflict": 3}
+    # A contradiction leads: it is the only kind that names which value is wrong
+    # rather than reporting that two exist, so it is the one a reader can act on
+    # without opening the source.
+    severity = {"contradiction": 0, "arithmetic": 1, "unit": 2, "crosslabel": 3, "conflict": 4}
     ordered = sorted(findings, key=lambda finding: severity.get(finding.kind, len(severity)))
     lines = [
         "> ## ⚠️ Numeric consistency warnings",
         ">",
-        "> These were found by a deterministic pass over the finished report. Each one is",
-        "> a figure that does not reconcile with other figures in the same report. Verify",
-        "> before acting on any conclusion that depends on them.",
+        "> These were found by a deterministic pass over the finished report. A",
+        "> [contradiction] disagrees with the verified source data for this run, which",
+        "> names the correct value; every other kind is the report failing to reconcile",
+        "> with itself. Verify before acting on any conclusion that depends on them.",
     ]
     for finding in ordered:
         lines.extend(

@@ -11,6 +11,7 @@ claim. Deterministic, no LLM involved.
 from __future__ import annotations
 
 import functools
+import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 
@@ -148,6 +149,48 @@ def get_trade_reference_levels(symbol: str, curr_date: str) -> TradeReference | 
         return None
 
 
+# The levels this block states, in the order it states them. Rendering and
+# parsing both read this table, so a level cannot be added to the block without
+# the parser seeing it — the drift that a round trip through rendered text would
+# otherwise invite. Field names match the metric keys report_lint uses, which is
+# what lets a parsed block adjudicate a disputed figure.
+_LEVEL_LINES: tuple[tuple[str, str], ...] = (
+    ("Last close", "close"),
+    ("ATR (daily volatility)", "atr"),
+    ("10 EMA", "ema10"),
+    ("50 SMA", "sma50"),
+    ("200 SMA", "sma200"),
+    ("52-week high", "week52_high"),
+    ("52-week low", "week52_low"),
+)
+
+
+def parse_trade_reference_block(block: str) -> dict[str, float]:
+    """Read the levels back out of a rendered block, keyed by metric.
+
+    The blocks are what a finished run keeps on its state; the ``TradeReference``
+    they came from is long gone by the time a report is written. Levels that were
+    ``N/A``, or that a malformed block lost, are simply absent — a caller
+    adjudicating a figure must be able to tell "the source says 110.60" from
+    "the source says nothing", and a zero would collapse the two.
+    """
+    if not isinstance(block, str) or not block:
+        return {}
+
+    figures: dict[str, float] = {}
+    for label, field in _LEVEL_LINES:
+        match = re.search(
+            rf"^- {re.escape(label)}: ([\d,]+\.\d\d)$", block, flags=re.MULTILINE
+        )
+        if match is None:
+            continue
+        try:
+            figures[field] = float(match.group(1).replace(",", ""))
+        except ValueError:  # pragma: no cover — the pattern admits only numbers
+            continue
+    return figures
+
+
 def render_trade_reference_block(
     ref: TradeReference | None, *, include_proposal_rule: bool = True
 ) -> str:
@@ -179,13 +222,7 @@ def render_trade_reference_block(
     lines = [
         f"**Verified price levels for {ref.symbol}** "
         f"(as of {ref.as_of}, bar status {ref.bar_status}):",
-        _line("Last close", ref.close),
-        _line("ATR (daily volatility)", ref.atr),
-        _line("10 EMA", ref.ema10),
-        _line("50 SMA", ref.sma50),
-        _line("200 SMA", ref.sma200),
-        _line("52-week high", ref.week52_high),
-        _line("52-week low", ref.week52_low),
+        *(_line(label, getattr(ref, field)) for label, field in _LEVEL_LINES),
     ]
     if ref.atr and ref.close:
         lines += [

@@ -368,6 +368,37 @@ conflict.** A linter that cries wolf on a correct report makes the warning block
 the least trustworthy thing in the output, which is the exact failure it exists
 to prevent.
 
+#### Adjudicating against the snapshot
+
+Where the run resolved a verified market block, the check reads it — the same
+block the debate reads, taken off the state rather than fetched, because linting
+happens while a finished report is being written. That changes what the gate can
+say. Comparing readings to each other establishes only that the report disagrees
+with itself; comparing them to the source names which value is wrong, and catches
+the case the spread check cannot see at all:
+
+```text
+50-day SMA: 111.05   ... stated three times, consistently, and wrong.
+                         No spread, so no conflict. The snapshot says 110.60.
+```
+
+A statement counts as faithful if it is within half a unit of the last place the
+writer used, **or** within the metric's relative tolerance. Both are needed, and
+each alone gets a real case wrong: an ATR verified at 8.09 and written `8` is
+exact at the precision offered but a 1.1% relative error, while a 50-day average
+written `110.59` against `110.60` is a cent out at the precision offered but
+plainly the same figure. Adjudication *replaces* the spread check for that metric
+rather than joining it, so a rounding and its precise twin cannot be reported as
+a conflict by one rule while the other confirms both.
+
+Only the market block contributes. Its levels are a fixed list of labelled
+numbers rendered and parsed from one shared table, so reading them back is exact
+and a new level cannot be added without the parser seeing it. The fundamentals
+snapshot is prose and tables shaped by whichever statements a vendor returned;
+guessing figures out of it would put invented authority behind a warning. So
+`debt_to_equity` and the rest keep the spread check, and a run whose snapshot was
+unavailable keeps it too.
+
 Three implementation details that were each a real bug:
 
 ```python
@@ -461,6 +492,7 @@ rule is added:
 | Gross margin = gross profit / revenue | Yes | Both operands are in hand; recompute |
 | Stop-loss direction matches position intent | Yes | A relation between fields; encode in the schema |
 | One metric may not carry two values | Yes | The finished text is its own reference |
+| A market figure must match the verified snapshot | Yes | The block is on the state; compare and name the wrong value |
 | Vendor operating income matches its line items | Yes | Recompute from the vendor's own figures |
 | A figure's scope may not be widened | **No** | No source text to diff against |
 | An unverified number may not become a fact | Partly | The marker is detectable; "used as support" is not |
