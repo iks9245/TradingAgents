@@ -57,6 +57,17 @@ reasoning in full.
   spread check cannot see at all. Extraction is deliberately conservative: a
   reading is dropped rather than guessed. Linting never raises, and the report is
   written whether or not it succeeds.
+- **Balance-sheet ratios reach that adjudication too.** `debt_to_equity` and
+  `current_ratio` are retained as a record rather than formatted away, so a
+  report stating one of them wrongly is told which value is right. A ratio has
+  two honest forms — the snapshot prints `6.01%  (= 0.0601x)` — so the stored
+  figure is dimensionless and the statement's own marker decides what it is
+  compared to; feeding one unscaled number to both would flag one of the two
+  *correct* forms on every faithful report. A **bare** number gets neither, and
+  keeps the spread check: whether `6.01` against a verified `0.0601` is a unit
+  error or a missing percent sign is not recoverable from the text, and a
+  contradiction names one value as wrong. Period-bearing ratios stay out for the
+  neighbouring reason — a margin has a period to disagree about first.
 - **Code-revision provenance.** Each report header carries the revision that
   produced it (`Generated: … · code fd0dc45`, or `fd0dc45+local-changes`). The
   revision resolves from the package's own location rather than the working
@@ -143,6 +154,11 @@ reasoning in full.
   A module that only reads finished reports off disk previously pulled in 230
   langchain and langgraph modules, and became unusable whenever that stack was.
   The public API is unchanged.
+- **`resolve_verified_evidence` returns a `VerifiedEvidence` record** rather than
+  a `(market, fundamentals)` tuple, so the figures it now also carries — and the
+  per-period series still to come — are added as fields instead of breaking every
+  unpacking call site again. **Breaking** for callers unpacking the old pair;
+  `TradingAgentsGraph.resolve_verified_evidence` is the public one.
 
 ### Fixed
 
