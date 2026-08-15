@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import functools
 from collections.abc import Iterable
+from dataclasses import dataclass
 
 import pandas as pd
 import yfinance as yf
@@ -28,6 +29,51 @@ from tradingagents.dataflows.stockstats_utils import (
     yf_retry,
 )
 from tradingagents.dataflows.symbol_utils import normalize_symbol
+
+# Which retained field answers which of ``report_lint``'s metric names. The
+# market snapshot could be adjudicated against because one shared table drives
+# both its renderer and its parser; this is the same idea with the parse step
+# removed, since a figure kept in a record never has to be read back out of
+# prose. A figure cannot be added to the record and forgotten by its consumers
+# without being absent from this table, which a test asserts against.
+_FACT_METRICS: tuple[tuple[str, str], ...] = (
+    ("debt_to_equity", "debt_to_equity"),
+    ("current_ratio", "current_ratio"),
+)
+
+
+@dataclass(frozen=True)
+class FundamentalFacts:
+    """Figures this module computed, kept rather than only formatted away.
+
+    Every section here renders a value and drops it in the same breath, which
+    is why the fundamentals snapshot stayed outside Gate 3's adjudication while
+    the market block joined it — not because these figures are less checkable,
+    but because nothing downstream could reach them.
+
+    Stored dimensionless: ``debt_to_equity`` is 0.0601, not 6.01. The block
+    prints both readings on purpose, and fixing one convention here is what
+    lets a consumer scale to whichever one a report actually used.
+    """
+
+    debt_to_equity: float | None = None
+    current_ratio: float | None = None
+
+    def verified_figures(self) -> dict[str, float]:
+        """The retained figures, keyed by the metric names ``report_lint`` uses."""
+        return {
+            metric: value
+            for metric, field_name in _FACT_METRICS
+            if (value := getattr(self, field_name)) is not None
+        }
+
+
+@dataclass(frozen=True)
+class FundamentalsSnapshot:
+    """The rendered block and the figures behind it, resolved in one pass."""
+
+    block: str
+    facts: FundamentalFacts
 
 
 def _row(df: pd.DataFrame, *candidates: str) -> pd.Series | None:
@@ -624,7 +670,15 @@ def _append_sign_label_check(lines: list[str], quarterly: pd.DataFrame, currency
     ]
 
 
-def _append_balance_section(lines: list[str], quarterly: pd.DataFrame, currency: str) -> None:
+def _append_balance_section(
+    lines: list[str], quarterly: pd.DataFrame, currency: str
+) -> dict[str, float]:
+    """Render the balance sheet, and return the ratios it computed.
+
+    The return value is the whole point of the signature change: these two
+    ratios are point-in-time and carry no period, which is what makes them
+    adjudicable against a report without a period to agree on first.
+    """
     assets = _row(quarterly, "Total Assets")
     liabilities = _row(quarterly, "Total Liabilities Net Minority Interest", "Total Liabilities")
     equity = _row(quarterly, "Stockholders Equity", "Total Equity Gross Minority Interest")
@@ -636,7 +690,7 @@ def _append_balance_section(lines: list[str], quarterly: pd.DataFrame, currency:
     inventory = _row(quarterly, "Inventory")
     period_list = _periods(assets, liabilities, equity, total_debt, long_debt, cash, current_assets, current_liabilities, inventory, limit=1)
     if not period_list:
-        return
+        return {}
     period = period_list[0]
     items = (
         ("Total assets", assets), ("Total liabilities", liabilities), ("Stockholders' equity", equity),
@@ -645,7 +699,7 @@ def _append_balance_section(lines: list[str], quarterly: pd.DataFrame, currency:
     )
     present = [(label, _value(values, period)) for label, values in items if _value(values, period) is not None]
     if not present:
-        return
+        return {}
     lines += ["", f"### Balance sheet, most recent quarter ({period:%Y-%m-%d})", "", "| Line item | Value |", "|---|---:|"]
     for label, value in present:
         lines.append(f"| {label} | {fmt_money(value, currency) or 'N/A'} |")
@@ -668,6 +722,13 @@ def _append_balance_section(lines: list[str], quarterly: pd.DataFrame, currency:
     if ratio_rows:
         lines += ["", "| Ratio | Verified calculation |", "|---|---:|"] + ratio_rows
         lines += ["", "Debt/equity is a balance-sheet ratio of borrowings to equity; goodwill and intangibles are assets and do not raise it."]
+
+    # Only the two that are rendered in both conventions and named by a metric
+    # alias. Long-term debt/equity and the quick ratio are computed here but
+    # have no consumer yet, and a figure retained with nothing reading it is a
+    # field that goes stale unnoticed.
+    retained = {"debt_to_equity": debt_ratio, "current_ratio": current_ratio}
+    return {key: value for key, value in retained.items() if value is not None}
 
 
 def _append_cash_flow_section(lines: list[str], annual: pd.DataFrame, quarterly: pd.DataFrame, currency: str) -> None:
@@ -844,8 +905,8 @@ def _append_valuation_section(lines: list[str], price: float | None, annual_eps:
 
 
 @functools.lru_cache(maxsize=64)
-def render_fundamentals_snapshot_block(symbol: str, curr_date: str) -> str:
-    """Build the snapshot for prompt injection, or an explicit unavailable notice.
+def resolve_fundamentals_snapshot(symbol: str, curr_date: str) -> FundamentalsSnapshot:
+    """The block and its figures, or an explicit unavailable notice and none.
 
     Offered as a tool, this snapshot was simply not called: on the 2026-08-06
     INTC run the analyst ignored the instruction and sourced every ratio from
@@ -854,14 +915,26 @@ def render_fundamentals_snapshot_block(symbol: str, curr_date: str) -> str:
     make a model call a tool; pre-fetching removes the choice.
 
     Cached because the analyst node re-runs on every turn of its tool loop and
-    the underlying filings do not change within a run.
+    the underlying filings do not change within a run. Block and figures are
+    resolved together and cached together — the run start wants the figures and
+    the analyst node wants the block, and splitting them across two caches would
+    buy a second full round of statement fetches for data already in hand.
+
+    An unavailable snapshot yields no figures rather than zeroed ones. A missing
+    figure falls back to the weaker self-consistency check downstream; a
+    fabricated one would be adjudicated against.
     """
     if not symbol or not curr_date:
-        return _UNAVAILABLE_NOTICE
+        return FundamentalsSnapshot(_UNAVAILABLE_NOTICE, FundamentalFacts())
     try:
-        return build_verified_fundamentals_snapshot(symbol, curr_date)
+        return build_verified_fundamentals(symbol, curr_date)
     except Exception:  # noqa: BLE001 — a missing snapshot must not block the run
-        return _UNAVAILABLE_NOTICE
+        return FundamentalsSnapshot(_UNAVAILABLE_NOTICE, FundamentalFacts())
+
+
+def render_fundamentals_snapshot_block(symbol: str, curr_date: str) -> str:
+    """The snapshot block alone, for prompt injection."""
+    return resolve_fundamentals_snapshot(symbol, curr_date).block
 
 
 _UNAVAILABLE_NOTICE = (
@@ -878,6 +951,15 @@ def build_verified_fundamentals_snapshot(
     curr_date: str,
     reference_price: float | None = None,
 ) -> str:
+    """The rendered block alone, for callers that only display it."""
+    return build_verified_fundamentals(symbol, curr_date, reference_price).block
+
+
+def build_verified_fundamentals(
+    symbol: str,
+    curr_date: str,
+    reference_price: float | None = None,
+) -> FundamentalsSnapshot:
     """Render date-safe statement facts and deterministic fundamental ratios."""
     canonical = normalize_symbol(symbol)
     ticker = yf.Ticker(canonical)
@@ -904,7 +986,7 @@ def build_verified_fundamentals_snapshot(
     _append_operating_income_crosscheck(lines, quarterly_income, annual_income, currency)
     _append_vendor_ratio_crosscheck(lines, _vendor_info(ticker), quarterly_income)
     _append_sign_label_check(lines, quarterly_income, currency)
-    _append_balance_section(lines, quarterly_balance, currency)
+    balance_ratios = _append_balance_section(lines, quarterly_balance, currency)
     _append_cash_flow_section(lines, annual_cashflow, quarterly_cashflow, currency)
     _append_price_statistics_section(lines, symbol, curr_date, currency)
     price = reference_price if reference_price is not None else _latest_close(symbol, curr_date)
@@ -913,4 +995,4 @@ def build_verified_fundamentals_snapshot(
         "",
         "Use this snapshot as the source of truth for every fundamental ratio, growth rate, and valuation multiple. Quote these figures; do not recompute them and do not carry a ratio from any other tool output, news summary, or social-media post into this report as fact. If another source states a figure that conflicts with this snapshot, report the conflict and name both sources rather than reconciling them. Every percentage you cite must name its period and its basis.",
     ]
-    return "\n".join(lines)
+    return FundamentalsSnapshot("\n".join(lines), FundamentalFacts(**balance_ratios))

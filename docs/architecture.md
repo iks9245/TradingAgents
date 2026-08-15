@@ -391,13 +391,46 @@ plainly the same figure. Adjudication *replaces* the spread check for that metri
 rather than joining it, so a rounding and its precise twin cannot be reported as
 a conflict by one rule while the other confirms both.
 
-Only the market block contributes. Its levels are a fixed list of labelled
-numbers rendered and parsed from one shared table, so reading them back is exact
-and a new level cannot be added without the parser seeing it. The fundamentals
-snapshot is prose and tables shaped by whichever statements a vendor returned;
-guessing figures out of it would put invented authority behind a warning. So
-`debt_to_equity` and the rest keep the spread check, and a run whose snapshot was
-unavailable keeps it too.
+Two sources contribute, by two different routes. The market levels are read back
+out of their own rendered block, which is exact because one shared table drives
+the renderer and the parser, and a new level cannot be added without the parser
+seeing it. The fundamentals figures are never parsed back — that block is prose
+and tables shaped by whichever statements a vendor returned, and guessing figures
+out of it would put invented authority behind a warning. They ride on the state
+as the record they were computed as, because the section that renders them now
+returns them instead of formatting them away.
+
+A run whose snapshot was unavailable contributes no figures at all, which leaves
+the spread check in place rather than adjudicating against a zero.
+
+#### A ratio has two honest forms
+
+`debt_to_equity` cannot be adjudicated the way a price level can, because one
+number is not enough to check it against. The snapshot deliberately prints both
+readings, and a report quoting it faithfully states either:
+
+```text
+| Total debt / equity | 6.01%  (= 0.0601x)  (3,871 / 64,462) |
+```
+
+The stored figure is the dimensionless ratio, and the *statement's own marker*
+decides what it is compared to: a `%` reading against the ratio scaled by 100, an
+`x` reading against it as it stands. Feeding one unscaled number to both would
+report one of the two correct forms as a contradiction on every report that
+states both — which the snapshot itself invites.
+
+A **bare** number gets neither. Whether `6.01` against a verified `0.0601` is the
+100× unit error this codebase has shipped once, or a writer omitting a percent
+sign, is not recoverable from the text. A `contradiction` names one value as
+wrong; asserting that on a coin flip would spend the credibility the finding
+exists to have. Bare readings stay with the spread check, which says only that
+two readings disagree — the weaker claim, and the true one.
+
+Period-bearing ratios stay out entirely for a related reason. A margin means
+nothing without its period and the linter's metric vocabulary has no period
+concept, so adjudicating one against a single scalar would fire whenever a report
+legitimately discusses an earlier quarter. Point-in-time balance-sheet ratios have
+no period to disagree about, which is why the line is drawn there.
 
 Three implementation details that were each a real bug:
 
@@ -493,6 +526,8 @@ rule is added:
 | Stop-loss direction matches position intent | Yes | A relation between fields; encode in the schema |
 | One metric may not carry two values | Yes | The finished text is its own reference |
 | A market figure must match the verified snapshot | Yes | The block is on the state; compare and name the wrong value |
+| A marked ratio must match the verified snapshot | Yes | The marker gives the convention; scale and compare |
+| A *bare* ratio must match the verified snapshot | **No** | Which convention it is written in is not recoverable |
 | Vendor operating income matches its line items | Yes | Recompute from the vendor's own figures |
 | A figure's scope may not be widened | **No** | No source text to diff against |
 | An unverified number may not become a fact | Partly | The marker is detectable; "used as support" is not |

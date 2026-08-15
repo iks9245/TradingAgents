@@ -238,6 +238,15 @@ _METRIC_TOLERANCE: dict[str, float] = {
 _MULTIPLE_MARKERS = frozenset({"x", "X", "倍"})
 _NON_PRICE_MARKERS = _MULTIPLE_MARKERS | {"%"}
 
+# What a verified ratio must be multiplied by to be read in a statement's own
+# convention. A ratio is honestly written two ways — "6.01%" and "0.0601x" are
+# the same leverage — so one number cannot adjudicate both, and the marker is
+# what says which is meant. The verified figure is the dimensionless ratio;
+# comparing it unscaled against every reading would report one of the two
+# correct forms as a contradiction on any report stating both, which the
+# fundamentals snapshot itself does: "| Total debt / equity | 6.01% (= 0.0601x)".
+_RATIO_MARKER_SCALE: dict[str, float] = {"%": 100.0, "x": 1.0, "X": 1.0, "倍": 1.0}
+
 
 @dataclass(frozen=True)
 class _MetricValue:
@@ -406,7 +415,7 @@ def _states_verified(stated: _MetricValue, verified: float, metric: str) -> bool
 
 
 def _contradiction_findings(
-    metric: str, stated: list[_MetricValue], verified: float
+    metric: str, stated: list[_MetricValue], verified: float, *, convention: str = ""
 ) -> list[Finding]:
     """Findings for statements that disagree with the run's own source data.
 
@@ -414,27 +423,65 @@ def _contradiction_findings(
     instead of reporting that two exist, and it catches a single wrong figure —
     a report that states one incorrect 50-day average, consistently, has no
     spread to detect and passes the other check untouched.
+
+    ``convention`` names the units both sides are being compared in, for metrics
+    that have more than one honest form. Without it a reader sees "stated as
+    0.5, verified 6.01" and cannot tell that one is a percent reading and the
+    other the figure it was checked against.
     """
     contradicting = [v for v in stated if not _states_verified(v, verified, metric)]
     if not contradicting:
         return []
 
+    named = f"{metric} ({convention} form)" if convention else metric
     furthest = max(contradicting, key=lambda value: abs(value.value - verified))
     rendered = ", ".join(value.display for value in _distinct_values(contradicting))
     return [
         Finding(
             kind="contradiction",
             summary=(
-                f"{metric} is stated as {furthest.display}, but the verified "
+                f"{named} is stated as {furthest.display}, but the verified "
                 f"value is {_display_number(verified)}"
             ),
             detail=(
-                f"Verified {metric}: {_display_number(verified)}. Contradicting "
+                f"Verified {named}: {_display_number(verified)}. Contradicting "
                 f"statements: {rendered}. Statements that read the verified "
                 f"figure faithfully, rounding included, are not listed."
             ),
         )
     ]
+
+
+def _ratio_contradiction_findings(
+    metric: str, stated: list[_MetricValue], verified: float
+) -> list[Finding]:
+    """Adjudicate a ratio in whichever convention each statement was written in.
+
+    ``verified`` is the dimensionless ratio. A reading marked "%" is compared
+    against it scaled by 100 and a reading marked "x" against it as it stands,
+    so a report that states both forms — as the snapshot it came from does —
+    has both confirmed rather than one of them reported as wrong.
+
+    An unmarked number is left to the spread check. Whether a bare "6.01"
+    against a verified 0.0601 is the 100x unit error this codebase has already
+    shipped once, or a writer omitting a percent sign, is not recoverable from
+    the text. A ``contradiction`` names one value as wrong, and asserting that
+    on a coin flip would spend the credibility the check exists to have; the
+    weaker finding that says two readings disagree is the honest one here.
+    """
+    marked = [value for value in stated if value.marker in _RATIO_MARKER_SCALE]
+    findings: list[Finding] = []
+    for scale in sorted({_RATIO_MARKER_SCALE[value.marker] for value in marked}):
+        group = [value for value in marked if _RATIO_MARKER_SCALE[value.marker] == scale]
+        findings += _contradiction_findings(
+            metric,
+            group,
+            verified * scale,
+            convention="percent" if scale != 1.0 else "multiple",
+        )
+
+    bare = [value for value in stated if value.marker not in _RATIO_MARKER_SCALE]
+    return findings + _spread_findings(metric, _distinct_values(bare))
 
 
 def _spread_findings(metric: str, distinct: list[_MetricValue]) -> list[Finding]:
@@ -488,6 +535,10 @@ def _metric_findings(
         verified_value = verified.get(metric)
         if verified_value is None:
             findings += _spread_findings(metric, _distinct_values(stated))
+        elif metric in _RATIO_METRICS:
+            # A ratio carries its convention in its marker, so it is adjudicated
+            # per convention rather than against one number (see below).
+            findings += _ratio_contradiction_findings(metric, stated, verified_value)
         else:
             # Adjudication replaces the spread check rather than joining it: a
             # rounding and its precise twin would otherwise be reported as a

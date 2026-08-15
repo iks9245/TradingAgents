@@ -30,11 +30,14 @@ challenged.
 
 from __future__ import annotations
 
+import contextlib
 from collections.abc import Mapping
+from dataclasses import dataclass, field
 from typing import Any
 
 from tradingagents.dataflows.fundamentals_validator import (
     render_fundamentals_snapshot_block,
+    resolve_fundamentals_snapshot,
 )
 from tradingagents.dataflows.market_data_validator import (
     get_trade_reference_levels,
@@ -71,19 +74,38 @@ _MARKET_UNAVAILABLE = render_trade_reference_block(None, include_proposal_rule=F
 FUNDAMENTALS_UNAVAILABLE = render_fundamentals_snapshot_block("", "")
 
 
+@dataclass(frozen=True)
+class VerifiedEvidence:
+    """What one run resolved once, for every consumer that needs it.
+
+    A record rather than a tuple because the figures arrived after the blocks
+    did and the series figures will arrive after them, and widening a tuple
+    breaks every unpacking call site each time it happens.
+    """
+
+    market: str
+    fundamentals: str
+    figures: dict[str, float] = field(default_factory=dict)
+
+
 def resolve_verified_evidence(
     ticker: str, trade_date: str, asset_type: str = "stock"
-) -> tuple[str, str]:
-    """Resolve both verified blocks for a run. Returns ``(market, fundamentals)``.
+) -> VerifiedEvidence:
+    """Resolve the verified blocks, and the figures behind them, for a run.
 
     Called once per run from the entry point — ``propagate()`` or the CLI — not
     from inside the graph. Both underlying resolvers fail open, returning an
     explicit "unavailable" notice rather than raising, so a missing vendor
     response degrades the prompt instead of blocking the run. Crypto is the
     ordinary case for missing fundamentals, not an error.
+
+    ``figures`` is what the blocks were computed from, kept so the report linter
+    can adjudicate against the source instead of only against the report. An
+    unavailable block contributes none: the linter then falls back to the
+    weaker check that has always worked on the report's own text.
     """
     if not ticker or not trade_date:
-        return _MARKET_UNAVAILABLE, FUNDAMENTALS_UNAVAILABLE
+        return VerifiedEvidence(_MARKET_UNAVAILABLE, FUNDAMENTALS_UNAVAILABLE)
 
     levels = get_trade_reference_levels(ticker, str(trade_date))
     market_block = render_trade_reference_block(levels, include_proposal_rule=False)
@@ -92,9 +114,10 @@ def resolve_verified_evidence(
     # unavailable notice, which is the right text to show — but skipping the
     # lookup avoids a pointless vendor round-trip on every crypto run.
     if asset_type == "crypto":
-        return market_block, FUNDAMENTALS_UNAVAILABLE
+        return VerifiedEvidence(market_block, FUNDAMENTALS_UNAVAILABLE)
 
-    return market_block, render_fundamentals_snapshot_block(ticker, str(trade_date))
+    snapshot = resolve_fundamentals_snapshot(ticker, str(trade_date))
+    return VerifiedEvidence(market_block, snapshot.block, snapshot.facts.verified_figures())
 
 
 def get_verified_evidence_block(
@@ -145,18 +168,33 @@ def verified_figures_from_state(state: Mapping[str, Any]) -> dict[str, float]:
     already carries them, so this is a read rather than a lookup, which matters
     because linting happens while a finished report is being written.
 
-    Only the market block contributes. Its levels are a fixed list of labelled
-    numbers, so reading them back is exact; the fundamentals snapshot is prose
-    and tables built around whichever statements a vendor returned, and guessing
-    at figures from it would put invented authority behind a warning.
+    The market levels are read back out of their own rendered block, which is
+    exact because one shared table drives the renderer and the parser. The
+    fundamentals figures are *not* parsed back: that block is prose and tables
+    shaped by whichever statements a vendor returned, so guessing figures out of
+    it would put invented authority behind a warning. They ride on the state as
+    the record they were computed as, and a run whose entry point did not
+    resolve them simply contributes none.
     """
+    figures: dict[str, float] = {}
+
     market = state.get("verified_market_block")
-    if not _is_present(market):
-        return {}
-    try:
-        return parse_trade_reference_block(market)
-    except Exception:  # noqa: BLE001 — no figure is better than a wrong one
-        return {}
+    if _is_present(market):
+        # No figure is better than a wrong one: an unparseable block leaves the
+        # linter on the report's own text rather than on a misread level.
+        with contextlib.suppress(Exception):
+            figures.update(parse_trade_reference_block(market))
+
+    fundamentals = state.get("verified_fundamentals_figures")
+    if isinstance(fundamentals, Mapping):
+        figures.update(
+            {
+                metric: float(value)
+                for metric, value in fundamentals.items()
+                if isinstance(value, (int, float)) and not isinstance(value, bool)
+            }
+        )
+    return figures
 
 
 def _is_present(value: Any) -> bool:
