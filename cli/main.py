@@ -1281,7 +1281,7 @@ def run_analysis(
         # Same reason, same path: the agents after the analysts check report
         # claims against these blocks, and they only have them if the entry
         # point resolved them.
-        market_block, fundamentals_block = graph.resolve_verified_evidence(
+        evidence = graph.resolve_verified_evidence(
             selections["ticker"],
             selections["analysis_date"],
             selections["asset_type"],
@@ -1291,8 +1291,9 @@ def run_analysis(
             selections["analysis_date"],
             asset_type=selections["asset_type"],
             instrument_context=instrument_context,
-            verified_market_block=market_block,
-            verified_fundamentals_block=fundamentals_block,
+            verified_market_block=evidence.market,
+            verified_fundamentals_block=evidence.fundamentals,
+            verified_fundamentals_figures=evidence.figures,
         )
         # Pass callbacks to graph config for tool execution tracking
         # (LLM tracking is handled separately via LLM constructor)

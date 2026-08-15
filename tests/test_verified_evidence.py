@@ -149,11 +149,14 @@ def test_crypto_skips_the_fundamentals_lookup():
         "tradingagents.agents.utils.verified_evidence.get_trade_reference_levels",
         return_value=None,
     ), patch(
-        "tradingagents.agents.utils.verified_evidence.render_fundamentals_snapshot_block"
+        "tradingagents.agents.utils.verified_evidence.resolve_fundamentals_snapshot"
     ) as fundamentals:
-        _, block = resolve_verified_evidence("BTC-USD", "2026-08-07", "crypto")
+        evidence = resolve_verified_evidence("BTC-USD", "2026-08-07", "crypto")
     fundamentals.assert_not_called()
-    assert block == FUNDAMENTALS_UNAVAILABLE
+    assert evidence.fundamentals == FUNDAMENTALS_UNAVAILABLE
+    # No filings means no figures, which is what leaves the linter on its
+    # weaker check rather than adjudicating against invented zeroes.
+    assert evidence.figures == {}
 
 
 @pytest.mark.unit
@@ -161,10 +164,11 @@ def test_missing_identifiers_resolve_to_notices_without_a_lookup():
     with patch(
         "tradingagents.agents.utils.verified_evidence.get_trade_reference_levels"
     ) as levels:
-        market, fundamentals = resolve_verified_evidence("", "", "stock")
+        evidence = resolve_verified_evidence("", "", "stock")
     levels.assert_not_called()
-    assert "UNAVAILABLE" in market
-    assert fundamentals == FUNDAMENTALS_UNAVAILABLE
+    assert "UNAVAILABLE" in evidence.market
+    assert evidence.fundamentals == FUNDAMENTALS_UNAVAILABLE
+    assert evidence.figures == {}
 
 
 # --- the levels renderer's two audiences -------------------------------------

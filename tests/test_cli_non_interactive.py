@@ -11,6 +11,7 @@ import pytest
 from typer.testing import CliRunner
 
 import cli.main as m
+from tradingagents.agents.utils.verified_evidence import VerifiedEvidence
 from tradingagents.reporting import ReportPaths
 from tradingagents.run_index import scan_runs
 
@@ -43,7 +44,11 @@ class _FakeTradingAgentsGraph:
         return {"symbol": ticker, "asset_type": asset_type}
 
     def resolve_verified_evidence(self, ticker, trade_date, asset_type="stock"):
-        return (f"market block for {ticker}", f"fundamentals block for {ticker}")
+        return VerifiedEvidence(
+            f"market block for {ticker}",
+            f"fundamentals block for {ticker}",
+            {"debt_to_equity": 0.0601},
+        )
 
     def create_initial_state(
         self,
@@ -54,6 +59,7 @@ class _FakeTradingAgentsGraph:
         instrument_context,
         verified_market_block=None,
         verified_fundamentals_block=None,
+        verified_fundamentals_figures=None,
     ):
         self.ticker = ticker
         self.analysis_date = analysis_date
@@ -61,6 +67,7 @@ class _FakeTradingAgentsGraph:
         # able to check a figure, so a scripted run losing them should fail
         # here rather than in a report nobody reads.
         self.verified_blocks = (verified_market_block, verified_fundamentals_block)
+        self.verified_figures = verified_fundamentals_figures
         return {}
 
     def get_graph_args(self, **kwargs):

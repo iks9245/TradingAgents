@@ -8,6 +8,11 @@ import pytest
 import tradingagents.dataflows.fundamentals_validator as validator
 
 
+def _fake_snapshot(block: str) -> validator.FundamentalsSnapshot:
+    """A snapshot carrying a block and no figures, for the block-path tests."""
+    return validator.FundamentalsSnapshot(block, validator.FundamentalFacts())
+
+
 def _frame(rows: dict[str, list[float]], columns: list[str]) -> pd.DataFrame:
     return pd.DataFrame(rows, index=pd.to_datetime(columns)).T
 
@@ -112,7 +117,7 @@ class TestSnapshotIsInjectedNotOffered:
         fake = _ticker()
         monkeypatch.setattr(validator.yf, "Ticker", lambda symbol: fake)
         monkeypatch.setattr(validator, "load_ohlcv", lambda symbol, date: pd.DataFrame())
-        validator.render_fundamentals_snapshot_block.cache_clear()
+        validator.resolve_fundamentals_snapshot.cache_clear()
 
         captured = self._node_prompt(monkeypatch)
         system_message = captured["prompt"].messages[0].content
@@ -124,7 +129,7 @@ class TestSnapshotIsInjectedNotOffered:
         fake = _ticker()
         monkeypatch.setattr(validator.yf, "Ticker", lambda symbol: fake)
         monkeypatch.setattr(validator, "load_ohlcv", lambda symbol, date: pd.DataFrame())
-        validator.render_fundamentals_snapshot_block.cache_clear()
+        validator.resolve_fundamentals_snapshot.cache_clear()
 
         assert "get_verified_fundamentals_snapshot" not in self._node_prompt(monkeypatch)["tools"]
 
@@ -132,8 +137,8 @@ class TestSnapshotIsInjectedNotOffered:
         def boom(*args, **kwargs):
             raise RuntimeError("vendor down")
 
-        monkeypatch.setattr(validator, "build_verified_fundamentals_snapshot", boom)
-        validator.render_fundamentals_snapshot_block.cache_clear()
+        monkeypatch.setattr(validator, "build_verified_fundamentals", boom)
+        validator.resolve_fundamentals_snapshot.cache_clear()
 
         block = validator.render_fundamentals_snapshot_block("AMD", "2025-12-31")
         assert "UNAVAILABLE" in block
@@ -143,10 +148,10 @@ class TestSnapshotIsInjectedNotOffered:
     def test_missing_arguments_do_not_reach_the_vendor(self, monkeypatch):
         called = []
         monkeypatch.setattr(
-            validator, "build_verified_fundamentals_snapshot",
-            lambda *a, **k: called.append(a) or "x",
+            validator, "build_verified_fundamentals",
+            lambda *a, **k: called.append(a) or _fake_snapshot("x"),
         )
-        validator.render_fundamentals_snapshot_block.cache_clear()
+        validator.resolve_fundamentals_snapshot.cache_clear()
 
         assert "UNAVAILABLE" in validator.render_fundamentals_snapshot_block("", "2025-12-31")
         assert "UNAVAILABLE" in validator.render_fundamentals_snapshot_block("AMD", "")
@@ -157,10 +162,10 @@ class TestSnapshotIsInjectedNotOffered:
         # is a fresh round of vendor calls each time.
         calls = []
         monkeypatch.setattr(
-            validator, "build_verified_fundamentals_snapshot",
-            lambda s, d: calls.append((s, d)) or "snapshot",
+            validator, "build_verified_fundamentals",
+            lambda s, d: calls.append((s, d)) or _fake_snapshot("snapshot"),
         )
-        validator.render_fundamentals_snapshot_block.cache_clear()
+        validator.resolve_fundamentals_snapshot.cache_clear()
 
         for _ in range(3):
             validator.render_fundamentals_snapshot_block("AMD", "2025-12-31")

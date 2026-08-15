@@ -55,6 +55,9 @@ class AgentState(MessagesState):
     verified_fundamentals_block: Annotated[
         str, "Verified fundamentals snapshot resolved at run start, same audience"
     ]
+    verified_fundamentals_figures: Annotated[
+        dict, "Figures behind the fundamentals block, kept for the report linter to adjudicate against"
+    ]
 
     sender: Annotated[str, "Agent that sent this message"]
 

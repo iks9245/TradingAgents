@@ -28,7 +28,10 @@ from tradingagents.agents.utils.agent_utils import (
     resolve_instrument_identity,
 )
 from tradingagents.agents.utils.memory import TradingMemoryLog
-from tradingagents.agents.utils.verified_evidence import resolve_verified_evidence
+from tradingagents.agents.utils.verified_evidence import (
+    VerifiedEvidence,
+    resolve_verified_evidence,
+)
 from tradingagents.dataflows.config import set_config
 from tradingagents.dataflows.utils import safe_ticker_component
 from tradingagents.default_config import DEFAULT_CONFIG
@@ -348,8 +351,8 @@ class TradingAgentsGraph:
 
     def resolve_verified_evidence(
         self, ticker: str, trade_date: str, asset_type: str = "stock"
-    ) -> tuple[str, str]:
-        """Resolve the verified market and fundamentals blocks once per run.
+    ) -> VerifiedEvidence:
+        """Resolve the verified market and fundamentals evidence once per run.
 
         Everything downstream of the analysts used to read prose only, which is
         why a wrong figure in a report became a premise both sides of the debate
@@ -437,7 +440,7 @@ class TradingAgentsGraph:
         # deterministically resolved instrument identity for all agents.
         past_context = self.memory_log.get_past_context(company_name)
         instrument_context = self.resolve_instrument_context(company_name, asset_type)
-        market_block, fundamentals_block = self.resolve_verified_evidence(
+        evidence = self.resolve_verified_evidence(
             company_name, str(trade_date), asset_type
         )
         init_agent_state = self.propagator.create_initial_state(
@@ -446,8 +449,9 @@ class TradingAgentsGraph:
             asset_type=asset_type,
             past_context=past_context,
             instrument_context=instrument_context,
-            verified_market_block=market_block,
-            verified_fundamentals_block=fundamentals_block,
+            verified_market_block=evidence.market,
+            verified_fundamentals_block=evidence.fundamentals,
+            verified_fundamentals_figures=evidence.figures,
         )
         args = self.propagator.get_graph_args()
 

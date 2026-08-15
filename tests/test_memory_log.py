@@ -8,6 +8,7 @@ import pytest
 from tradingagents.agents.managers.portfolio_manager import create_portfolio_manager
 from tradingagents.agents.schemas import PortfolioDecision, PortfolioRating
 from tradingagents.agents.utils.memory import TradingMemoryLog
+from tradingagents.agents.utils.verified_evidence import VerifiedEvidence
 from tradingagents.graph.propagation import Propagator
 from tradingagents.graph.reflection import Reflector
 from tradingagents.graph.trading_graph import TradingAgentsGraph
@@ -862,8 +863,9 @@ class TestLegacyRemoval:
         mock_graph.propagator.create_initial_state.return_value = fake_state
         mock_graph.propagator.get_graph_args.return_value = {}
         mock_graph.signal_processor.process_signal.return_value = "Buy"
-        # _run_graph unpacks this into two blocks; a bare MagicMock is not a pair.
-        mock_graph.resolve_verified_evidence.return_value = ("", "")
+        # _run_graph reads fields off this; a bare MagicMock would hand a
+        # MagicMock to create_initial_state instead of the blocks.
+        mock_graph.resolve_verified_evidence.return_value = VerifiedEvidence("", "")
         # Bind the real _run_graph so propagate's call to self._run_graph executes
         # the actual write path instead of the auto-MagicMock.
         mock_graph._run_graph = functools.partial(

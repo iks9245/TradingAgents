@@ -24,6 +24,7 @@ class Propagator:
         instrument_context: str = "",
         verified_market_block: str = "",
         verified_fundamentals_block: str = "",
+        verified_fundamentals_figures: dict[str, float] | None = None,
     ) -> dict[str, Any]:
         """Create the initial state for the agent graph.
 
@@ -37,6 +38,12 @@ class Propagator:
         downstream of the analysts check report claims against (see
         ``TradingAgentsGraph.resolve_verified_evidence``). Left empty, each
         consumer resolves them on demand rather than reasoning without them.
+
+        ``verified_fundamentals_figures`` carries the same snapshot's figures in
+        the form they were computed, for the report linter at the end of the
+        run. No agent reads it — the block is what a prompt can use — so it is
+        the one piece of verified evidence that exists purely to be checked
+        against rather than argued from.
         """
         return {
             "messages": [("human", company_name)],
@@ -47,6 +54,7 @@ class Propagator:
             "past_context": past_context,
             "verified_market_block": verified_market_block,
             "verified_fundamentals_block": verified_fundamentals_block,
+            "verified_fundamentals_figures": dict(verified_fundamentals_figures or {}),
             "investment_debate_state": InvestDebateState(
                 {
                     "bull_history": "",
