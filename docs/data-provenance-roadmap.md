@@ -1,9 +1,13 @@
 # Where the verified data goes next
 
-This is a plan, not a record. [`architecture.md`](architecture.md) describes what
-runs today; this describes three pieces of work that are not built yet, why they
-are ordered the way they are, and — for each — what it can honestly deliver
-versus what it cannot.
+Mostly a plan, not a record. [`architecture.md`](architecture.md) describes what
+runs today; this describes three pieces of work, why they are ordered the way
+they are, and — for each — what it can honestly deliver versus what it cannot.
+
+**Stage 1a has since landed.** It is kept here in full rather than deleted,
+because the reasoning behind its boundaries is what the later stages inherit, and
+because what it deliberately left undone is the specification for 1b. Everything
+else below is still unbuilt.
 
 The three gates now catch a wrong number in a finished report by comparing the
 report against the run's own market snapshot. The work below extends that
@@ -77,7 +81,7 @@ metric requires no change to the linter.** The only reason fundamentals figures
 never arrive is that `verified_figures_from_state` returns
 `parse_trade_reference_block(market)` and nothing else.
 
-### 1a — Scalar metrics
+### 1a — Scalar metrics *(landed)*
 
 Give the snapshot a typed record alongside its rendered block, following the
 market path's pattern: one shared field table, a frozen dataclass, render and
@@ -85,15 +89,37 @@ access driven by the same source.
 
 | Where | Change |
 |---|---|
-| `dataflows/fundamentals_validator.py` | A `FundamentalFacts` record; `_append_balance_section` fills it rather than only formatting |
-| `agents/utils/verified_evidence.py` | `resolve_verified_evidence` returns the figures alongside the two blocks |
+| `dataflows/fundamentals_validator.py` | A `FundamentalFacts` record; `_append_balance_section` returns the ratios it computed rather than only formatting them |
+| `agents/utils/verified_evidence.py` | `resolve_verified_evidence` returns a `VerifiedEvidence` record carrying the figures beside the two blocks |
 | `agents/utils/agent_states.py` | A `verified_fundamentals_figures` key beside the two existing block keys |
 | `graph/trading_graph.py` | Store it where the blocks are already stored |
-| `report_lint.py` | Tolerances for the new metrics in `_METRIC_TOLERANCE` — nothing else |
+| `report_lint.py` | Unit-aware adjudication for ratio metrics |
 
-Done when a report stating `debt_to_equity` as 6.01 against a snapshot holding
-0.0601 produces a `[contradiction]` naming the correct value, rather than passing
+A report stating `debt_to_equity` as `61.5%` against a snapshot holding `0.0601`
+now produces a `[contradiction]` naming the correct value, rather than passing
 silently.
+
+Two things this plan predicted wrongly, recorded because the same guesses would
+otherwise be repeated for 1b:
+
+**`report_lint` needed more than tolerances, and no tolerances at all.** The 1%
+`_DEFAULT_TOLERANCE` was already right for ratios, so `_METRIC_TOLERANCE` gained
+no entries. What it did need was the rule below, which the plan did not
+anticipate — "adding a metric requires no linter change" held for the market
+metrics and not for these.
+
+**A ratio has two honest forms.** `debt_to_equity` is in `_RATIO_METRICS`, where
+percent- and multiple-marked readings are both kept, and the snapshot prints both
+on purpose. Adjudicating both against one unscaled figure would have flagged one
+of the two *correct* forms on every report quoting the snapshot faithfully — a
+guaranteed false positive, discovered only when the code was written. The stored
+figure is dimensionless and the statement's own marker decides what it is
+compared to. See `architecture.md`, "A ratio has two honest forms".
+
+Also unchanged from the plan, and worth keeping in view for 1b: block and figures
+resolve and cache together, since they were already computed in one pass; and an
+unavailable snapshot contributes no figures rather than zeroed ones, because zero
+is a real leverage reading.
 
 ### 1b — Series metrics
 
@@ -196,13 +222,13 @@ sources are retained and can be tried against real cases, not before.
 
 ## Sequencing
 
-| # | Work | Depends on | Size |
-|---|---|---|---|
-| 1 | `FundamentalFacts`; scalar metrics reach adjudication | — | Medium |
-| 2 | Series interface; cross-label names the wrong column | 1 | Medium |
-| 3 | `dataflows/sec_edgar.py`; look-ahead by filing date; vendor chain | — | Large |
-| 4 | Two-sided operating-income check; as-filed FCF | 2, 3 | Medium |
-| 5 | News source retention and figure traceability | — | Medium |
+| # | Work | Depends on | Size | State |
+|---|---|---|---|---|
+| 1 | `FundamentalFacts`; scalar metrics reach adjudication | — | Medium | **Landed** |
+| 2 | Series interface; cross-label names the wrong column | 1 | Medium | Next |
+| 3 | `dataflows/sec_edgar.py`; look-ahead by filing date; vendor chain | — | Large | |
+| 4 | Two-sided operating-income check; as-filed FCF | 2, 3 | Medium | |
+| 5 | News source retention and figure traceability | — | Medium | |
 
 1 and 3 are independent — the EDGAR fetch layer does not need the structured
 snapshot — but 4 needs both. 5 touches none of the others and can land at any
