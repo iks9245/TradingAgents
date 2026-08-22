@@ -6,6 +6,231 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Breaking changes within the 0.x line are called out explicitly.
 
+## [Unreleased]
+
+Verification work: three deterministic gates around the LLM pipeline, a harness
+for measuring whether the pipeline's components change its decisions, browser and
+index outputs for finished runs, and a CLI that runs without a terminal.
+
+Every numeric defect fixed below was found in a shipped report, and each one
+survived a Bull/Bear debate that ran exactly as designed. Bull and Bear read the
+same four report fields and, until this cycle, neither had a route back to the
+source — so a wrong figure arrived not as a claim either could dispute but as a
+shared premise. That is why verification is a separate layer rather than a
+sharper prompt. [`docs/architecture.md`](docs/architecture.md) records the
+reasoning in full.
+
+### Added
+
+- **Backtest harness.** `python -m tradingagents.backtest` scores each rating
+  against the realized forward return and compares it — paired, on an identical
+  grid — against `always_buy`, `random_uniform`, and `random_matched` (the
+  pipeline's own rating distribution, randomly reassigned). Confidence intervals
+  bootstrap clustered on the decision date, since same-day decisions across
+  tickers share a market factor. `--knowledge-cutoff` reports pre-cutoff dates
+  separately rather than dropping them, `--dry-run` prices a run before it
+  spends, and `--cache` makes an interrupted one resumable. A positive-control
+  test establishes that a null result means no edge rather than a harness that
+  cannot find one. See [`docs/backtesting.md`](docs/backtesting.md).
+- **Ablation runner.** Only four of the graph's twelve decision nodes fetch new
+  information; `python -m tradingagents.backtest.ablation_cli` measures whether
+  the other eight change the outcome. Suites: `analysts_drop_one`,
+  `analysts_solo`, `debate_depth`, `risk_depth`. Arm names derive from the
+  configuration, so one cache file serves every arm and two differently
+  configured arms cannot silently serve each other's decisions. Each comparison
+  states its resolvable effect size, so an underpowered null stays
+  distinguishable from evidence that a component does nothing.
+- **HTML reports.** `python -m tradingagents.webreport` renders a finished run as
+  one self-contained file — inline CSS and SVG, no external requests — and a
+  saved run now writes `complete_report.html` beside the markdown automatically.
+  `--html` adds charts to both backtest CLIs. Markdown stays the source of truth:
+  the HTML is generated from it, report bodies render as untrusted content, and a
+  renderer failure costs the run nothing. Opt out with `--no-html` or
+  `TRADINGAGENTS_REPORT_HTML=false`. See
+  [`docs/html-reports.md`](docs/html-reports.md).
+- **Gate 3 — report lint.** A deterministic pass over the assembled markdown
+  recomputes stated divisions, flags a metric written as both a percent and a
+  multiple with the same value, and reports one metric carrying two incompatible
+  values. Where the run resolved a verified market block, figures are adjudicated
+  against it rather than only against each other — which names *which* value is
+  wrong, and catches a figure that is wrong but stated consistently, the shape a
+  spread check cannot see at all. Extraction is deliberately conservative: a
+  reading is dropped rather than guessed. Linting never raises, and the report is
+  written whether or not it succeeds.
+- **Balance-sheet ratios reach that adjudication too.** `debt_to_equity` and
+  `current_ratio` are retained as a record rather than formatted away, so a
+  report stating one of them wrongly is told which value is right. A ratio has
+  two honest forms — the snapshot prints `6.01%  (= 0.0601x)` — so the stored
+  figure is dimensionless and the statement's own marker decides what it is
+  compared to; feeding one unscaled number to both would flag one of the two
+  *correct* forms on every faithful report. A **bare** number gets neither, and
+  keeps the spread check: whether `6.01` against a verified `0.0601` is a unit
+  error or a missing percent sign is not recoverable from the text, and a
+  contradiction names one value as wrong. Period-bearing ratios stay out for the
+  neighbouring reason — a margin has a period to disagree about first.
+- **Code-revision provenance.** Each report header carries the revision that
+  produced it (`Generated: … · code fd0dc45`, or `fd0dc45+local-changes`). The
+  revision resolves from the package's own location rather than the working
+  directory, and an untracked location reports `unknown` plus the path it was
+  imported from — because a stale `pip install .` copy running beside a current
+  checkout is exactly the case that made this necessary.
+- **Run index.** `tradingagents/run_index.py` reads what each report directory
+  already records and renders one row per run — rating, price target, code
+  revision, and a status of `ok`, `incomplete`, `N warnings`, `N unvalidated`,
+  `unknown code`, or `local changes`. It is refreshed as part of every save, so
+  a run whose numbers failed to reconcile is visible without opening it. Rebuild
+  over any directory with `python -m tradingagents.run_index reports`
+  (`--markdown` for the text form). Scanning never re-runs the linter and never
+  raises. Opt out with `--no-index` or `TRADINGAGENTS_REPORT_INDEX=false`.
+- **Non-interactive runs.** `tradingagents analyze --non-interactive` (`-y`) runs
+  an analysis end to end without a single prompt, alongside `--ticker`, `--date`,
+  `--analysts`, `--save-to`, `--no-save`, and `--display/--no-display`. The flag
+  is the whole contract: it never prompts, and a missing value names itself and
+  exits 2 rather than reaching for a terminal that is not there. The resolved
+  report directory is echoed as the last line of stdout. Supplying the input
+  flags *without* `--non-interactive` simply pre-fills those steps.
+- **Verified snapshots in the debate.** Both snapshots are resolved once at run
+  start, stored on the state, and injected into the Bull, the Bear, the Research
+  Manager, the Trader, and the Portfolio Manager. The rule travelling with them
+  is the point: where a report, a debate turn, or a social post disagrees with a
+  verified figure, the verified figure stands and the conflict is named — not
+  averaged, not quietly resolved toward whichever reading suits.
+- **Evidence tiers and scope discipline.** `agents/utils/evidence_policy.py`
+  distinguishes a number computed from a filing from one typed on a message
+  board: the sentiment analyst marks the quantitative claims it relays, and every
+  downstream agent carries a rule that an unverified number stays unverified no
+  matter how often the debate history repeats it. A companion rule keeps a
+  figure's scope — which part of the business it covers, what drove it, and its
+  comparison basis — since widening scope is a stronger claim than the source
+  made, not a summary of it.
+- **Bar settlement status.** `dataflows/session_status.py` classifies the newest
+  daily bar as `FINAL`, `IN-PROGRESS`, or `UNKNOWN` from the instrument's own
+  exchange calendar. Yahoo publishes a partial candle while a session is open —
+  its close is the last trade, not the settlement price — and nothing downstream
+  could otherwise tell that row apart from a settled one.
+- **Stop-loss geometry checks.** `PositionIntent` makes a Sell say whether it
+  opens a short or trims a long, and a model validator rejects a stop on the
+  wrong side of entry for the stated intent. The ATR distance is computed in
+  Python and printed beneath the proposal. A priced proposal with no stop now
+  says so and names where a 1× ATR stop would have sat, rather than rendering
+  nothing and looking like one that passed inspection.
+- **MiMo and oMLX providers** — Xiaomi MiMo and local oMLX OpenAI-compatible
+  endpoints, with model selections, configuration examples, and validation.
+- **`docs/architecture.md`** — the node walk, the three gates, evidence tiers,
+  and a table of which rules can be enforced deterministically and which are only
+  asked for in a prompt.
+
+### Changed
+
+- **A save failure now exits 1.** It previously printed the error and returned 0,
+  which for a scripted caller is the worst available answer: success reported for
+  a run whose only deliverable was never written. **Breaking** for scripts that
+  read the exit code of `analyze`.
+- **Vendor price statistics are gone from the output.** `fiftyDayAverage` and its
+  neighbours are computed on a different schedule and basis than the technical
+  snapshot's, which put a 50-day average of 512.95 in one section of a report
+  whose other section said 514.33. Both snapshots now read the same settled OHLCV
+  frame. **Breaking** for code reading those fields out of the fundamentals
+  payload.
+- **A rejected structured proposal earns one retry** with the validator's
+  complaint fed back, and rejections are distinguished from capability failures —
+  retrying a provider that cannot emit structured output at all is pointless.
+  Anything still reaching the free-text path is prefixed with a notice naming the
+  checks that did not run. A silently bypassed guard is worse than no guard.
+- **The verified fundamentals snapshot is injected, not offered as a tool.** A
+  prompt cannot make a model call a tool, and on a shipped run the analyst simply
+  did not — sourcing every ratio from the raw vendor dump instead. It now arrives
+  in the system message, cached per (ticker, date), with an explicit unavailable
+  notice on failure.
+- **Fundamentals figures carry their definition and period.** Every free-cash-flow
+  column reads `simplified FCF (OCF − capex)`, with a note that a company-defined
+  measure exists and can carry the opposite sign; vendor ratios are relabelled
+  `(vendor ratio)` and carry no period the reader may assume; margins and their
+  period-on-period change print with their operands (`+0.98 pp (40.36% −
+  39.38%)`).
+- **On-disk consumers no longer import the LLM stack.** `tradingagents.agents`
+  exports lazily (PEP 562), `UNVALIDATED_MARKER` moved to the stdlib-only
+  `evidence_policy`, and the langgraph warning filter moved to `graph/_compat`.
+  A module that only reads finished reports off disk previously pulled in 230
+  langchain and langgraph modules, and became unusable whenever that stack was.
+  The public API is unchanged.
+- **`resolve_verified_evidence` returns a `VerifiedEvidence` record** rather than
+  a `(market, fundamentals)` tuple, so the figures it now also carries — and the
+  per-period series still to come — are added as fields instead of breaking every
+  unpacking call site again. **Breaking** for callers unpacking the old pair;
+  `TradingAgentsGraph.resolve_verified_evidence` is the public one.
+
+### Fixed
+
+- **Yahoo news window is UTC and end-exclusive.** The upper bound was inclusive,
+  so an article stamped exactly midnight after `end_date` leaked into a
+  historical run; flat epoch timestamps were parsed in host-local time, making
+  filtering machine-dependent. (#1126)
+- **OHLCV cache reuse follows session settlement, not the host's calendar.**
+  "Is the requested date before today" and "has the session settled" have the same
+  answer only in the Americas: at 06:26 in Taipei, a request for the previous
+  session looked like history although New York had closed two hours earlier, so
+  a file holding Yahoo's partial candle was judged immutable and reused. Reuse
+  now depends on whether the file was written after the requested session
+  settled. Also fixes the case the old rule missed entirely — a cache written
+  days *before* the requested date cannot hold that session's rows at all, yet
+  compared as history and was served. A same-day cache is additionally governed
+  by a TTL. (#1150)
+- **Unit conventions in the vendor payload.** yfinance's `info` dict mixes
+  fractions, percents, and bare multiples in one flat namespace; dumping them
+  unlabelled produced "debt/equity 6.01, relatively high" for a company whose
+  debt is 6% of equity. Every value now renders with its unit inline, and both
+  readings where a value can honestly be read two ways.
+- **Vendor operating income is checked against its own line items.** yfinance
+  reported one quarter's operating income as 1,966M while the expense rows it
+  itemised just above gave 1,805M — a restructuring charge listed and then not
+  deducted. The snapshot rebuilds the figure from gross profit minus itemised
+  operating expenses and prints both. The comparison is deliberately one-sided:
+  blaming a vendor for our own incomplete enumeration of expense rows is how a
+  warning block loses its reader.
+- **Each vendor ratio's period is resolved rather than assumed.** `profitMargins`
+  is trailing-twelve-month and `operatingMargins` is the most recent quarter
+  alone; the field table asserted TTM on both, which let a single quarter's
+  12.19% operating margin be reported as the trailing figure against 7.55% from
+  four quarters of the vendor's own statements.
+- **Rows whose label promises a gain while holding a negative value** are flagged.
+  A "Gain On Sale Of Security" of −12,476M was published as a 12.43B non-cash
+  gain and used to explain away the quarter's net loss, when it was the largest
+  single cause of it.
+- **One number under two incompatible labels** is caught. Operating and free cash
+  flow differ by capital expenditure, so the same figure cannot be both — yet
+  three agents in turn quoted an FCF figure as operating cash flow, the last
+  calling it verified. Table columns are now read by position against their
+  header, and a detached minus in `-$2.54B` is applied.
+- **Report-lint false positives**, in two rounds, taking the four reports on hand
+  from five false warnings to zero while keeping every genuine conflict: a
+  trailing-comma guard that truncated `$111.52` to `111`; a number taken as a
+  metric's value merely for appearing near its label; a percent-marked value read
+  as a second price reading; the linter re-reading its own evidence line on a
+  saved report; `vs` pairs, where which side is the metric is not recoverable
+  positionally; bracketed indicator lookbacks like `ATR (14)` read as values; and
+  `≈` missing from the hedge detector, so a rounded restatement counted as a
+  second measurement.
+- **The transaction marker survives a structured fallback.** `render_trader_proposal`
+  does not run on the fallback path, so a shipped report carried no
+  `FINAL TRANSACTION PROPOSAL` line at all. It is restored from the prose only
+  when one action is labelled unambiguously; conflicting or absent labels yield
+  an explicit `UNDETERMINED`, because a guessed direction under that marker reads
+  exactly like a validated one.
+- **Rating parsers skip blockquoted lines.** The unvalidated notice is prepended
+  to the section it describes, so a schema rejection quoting the allowed values
+  ("Input should be 'Buy', 'Overweight', …") sat above the decision — and a lint
+  warning block quotes rating words verbatim. A notice is commentary about the
+  output, not the output.
+- **Schema-only structured agents no longer prime tool calls.**
+  `with_structured_output` binds a single tool, so a primed model emitted an
+  unknown `web_search` call and the attempt was discarded for a free-text retry,
+  costing a round trip and the typed output. (#1130)
+- **An unusable Windows terminal reports itself** instead of surfacing a raw
+  `NoConsoleScreenBufferError` traceback before the first prompt. (#1138)
+- **The run index subtitle agrees with its count** — a one-run directory was
+  titled "1 runs".
+
 ## [0.3.1] — 2026-07-05
 
 Correctness and stability patch: data look-ahead, graph-router crash-safety,
